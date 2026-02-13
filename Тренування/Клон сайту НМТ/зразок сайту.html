@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Онлайн-тестувальник НМТ - Візуальний Клон</title>
+    <style>
+        /* --- Загальні стилі --- */
+        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap');
+
+        body {
+            font-family: 'Roboto', sans-serif;
+            background-color: #f4f4f4;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            font-size: 14px;
+        }
+        .container {
+            max-width: 900px;
+            margin: 20px auto;
+            padding: 20px;
+            background-color: #fff;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .button {
+            display: inline-block;
+            padding: 10px 20px;
+            font-size: 16px;
+            font-weight: 500;
+            color: #fff;
+            background-color: #e04455;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            text-align: center;
+            text-decoration: none;
+        }
+        .button:hover {
+            background-color: #c83b4a;
+        }
+        .logo {
+            width: 50px;
+            height: auto;
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+            margin-bottom: 20px;
+        }
+        .user-name {
+            font-weight: 500;
+        }
+
+        /* --- Стилі для сторінки тестування --- */
+        .test-header {
+            background-color: #ffebee;
+            border: 1px solid #e04455;
+            padding: 10px;
+            margin-bottom: 15px;
+            border-radius: 5px;
+            color: #c83b4a;
+            font-size: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .timer-section {
+            display: flex;
+            align-items: center;
+            font-size: 16px;
+            font-weight: bold;
+            color: #333;
+        }
+        .test-nav {
+            display: flex;
+            border-bottom: 2px solid #e04455;
+            margin-bottom: 20px;
+        }
+        .test-nav .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+        }
+        .test-nav .tab.active {
+            border: 2px solid #e04455;
+            border-bottom: 2px solid #fff;
+            margin-bottom: -2px;
+            background-color: #fff;
+            border-top-left-radius: 5px;
+            border-top-right-radius: 5px;
+            font-weight: bold;
+        }
+        .instruction-text {
+            background-color: #f0f0f0;
+            padding: 10px 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            border-left: 3px solid #e04455;
+        }
+        .question-block {
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .question-title {
+            font-weight: bold;
+            margin-bottom: 15px;
+        }
+
+        /* --- Стилі для завдання з ОДНИМ вибором --- */
+        .single-option {
+            display: flex;
+            align-items: center;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: border-color 0.2s, background-color 0.2s;
+        }
+        .single-option:before {
+            content: '';
+            width: 16px;
+            height: 16px;
+            border: 1px solid #999;
+            border-radius: 50%;
+            margin-right: 10px;
+            flex-shrink: 0;
+        }
+        .single-option:hover {
+            border-color: #e04455;
+            background-color: #fff1f2;
+        }
+
+        /* --- Стилі для завдання на ВІДПОВІДНІСТЬ --- */
+        .matching-task { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; }
+        .matching-left { flex-basis: 65%; display: flex; flex-direction: column; gap: 10px; }
+        .match-item { display: flex; align-items: center; background-color: #e3f2fd; padding: 8px; border: 1px solid #bbdefb; border-radius: 5px; }
+        .match-number { font-weight: bold; margin-right: 15px; }
+        .match-arrow { margin: 0 10px; color: #555; }
+        .match-answer-placeholder { flex-grow: 1; background-color: #fff; border: 1px solid #ccc; padding: 8px; border-radius: 4px; min-height: 20px; position: relative; cursor: pointer; }
+        .match-answer-placeholder::after { content: '▾'; position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: #888; font-size: 16px; }
+        .matching-right { flex-basis: 35%; background-color: #f1f8e9; border: 1px solid #dcedc8; border-radius: 5px; padding: 10px; }
+        .match-option { background-color: #fff; border: 1px solid #ccc; padding: 8px; margin-bottom: 8px; border-radius: 4px; cursor: grab; display: flex; }
+        .match-option:last-child { margin-bottom: 0; }
+        .option-letter { font-weight: bold; margin-right: 10px; }
+
+        /* --- Стилі для завдання з КОРОТКОЮ відповіддю --- */
+        .short-answer-input { width: 120px; padding: 10px; margin-top: 5px; border: 1px solid #ccc; border-radius: 4px; font-size: 16px; }
+
+        /* === НОВІ СТИЛІ ДЛЯ ЗАВДАННЯ З КІЛЬКОМА ВІДПОВІДЯМИ === */
+        .multi-choice-block {
+            border: 1px solid #ccc;
+            border-top: 1px solid #e04455;
+            border-left: 1px solid #e04455;
+            border-right: 1px solid #e04455;
+            padding: 0;
+            border-top-left-radius: 5px;
+            border-top-right-radius: 5px;
+        }
+        .multi-choice-header {
+            background-color: #f0f0f0;
+            padding: 8px 15px;
+            font-weight: bold;
+            border-bottom: 1px solid #ddd;
+        }
+        .multi-choice-body {
+            padding: 15px;
+        }
+        .multi-option {
+            display: flex;
+            align-items: center;
+            background-color: #fafafa;
+            border: 1px solid #ddd;
+            padding: 10px;
+            margin-bottom: -1px; /* Накладання рамок */
+            cursor: pointer;
+            position: relative;
+        }
+        .multi-option:hover {
+            border: 1px solid #e04455;
+            z-index: 1;
+        }
+        .custom-checkbox {
+            width: 14px;
+            height: 14px;
+            border: 1px solid #888;
+            border-radius: 3px;
+            margin-right: 10px;
+            flex-shrink: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+    </style>
+</head>
+<body>
+    
+    <div class="container">
+        <h2>Онлайн Тестувальник</h2>
+        <div class="header">
+            <img src="https://testportal.gov.ua/wp-content/uploads/2021/01/logo-e1610459523293.png" alt="Логотип УЦОЯО" class="logo">
+            <div class="user-name">Кононенко Дарина Андріївна</div>
+        </div>
+        
+        <div class="test-header">
+            <div>НМТ_демо обмежений у часі. Таймер праворуч показує, скільки хвилин залишилося до кінця роботи...</div>
+            <div class="timer-section"><span>1:59:45</span> <span>👁️</span></div>
+        </div>
+        
+        <div class="test-nav">
+            <div class="tab active">Історія України</div>
+            <div class="tab">Українська мова</div>
+            <div class="tab">Математика</div>
+        </div>
+        
+        <div class="instruction-text">
+            <b>Завдання 28–30 мають по сім варіантів відповіді, з яких лише ТРИ правильні.</b> Виберіть правильні, на Вашу думку, варіанти відповідей і натисніть курсором на значок ☐ ліворуч від нього. Варіанти відповідей ☑, позначені Вами, ЗБЕРЕЖІТЬ, натиснувши курсором на кнопку під завданням.
+        </div>
+
+        <!-- ТИП 1: Завдання з вибором однієї відповіді -->
+        <div class="question-block">
+            <div class="question-title">Завдання 2. Незалежність Української Народної Республіки проголошено</div>
+            <div class="single-option">4 березня 1917 р.</div>
+            <div class="single-option">7 листопада 1917 р.</div>
+            <div class="single-option">22 січня 1918 р.</div>
+            <div class="single-option">29 квітня 1918 р.</div>
+            <button class="button" style="margin-top: 15px;">Зберегти відповідь</button>
+        </div>
+        
+        <!-- ТИП 2: Завдання на встановлення відповідності -->
+        <div class="question-block">
+             <div class="question-title">Завдання 17. З'ясуйте, якими частинами мови є виділені слова...</div>
+             <div class="matching-task">
+                 <div class="matching-left">
+                     <div class="match-item"><span class="match-number">1</span><span class="match-arrow">→</span><div class="match-answer-placeholder"></div></div>
+                     <div class="match-item"><span class="match-number">2</span><span class="match-arrow">→</span><div class="match-answer-placeholder"></div></div>
+                     <div class="match-item"><span class="match-number">3</span><span class="match-arrow">→</span><div class="match-answer-placeholder"></div></div>
+                     <div class="match-item"><span class="match-number">4</span><span class="match-arrow">→</span><div class="match-answer-placeholder"></div></div>
+                 </div>
+                 <div class="matching-right">
+                     <div class="match-option"><span class="option-letter">А</span><span>іменник</span></div>
+                     <div class="match-option"><span class="option-letter">Б</span><span>прикметник</span></div>
+                     <div class="match-option"><span class="option-letter">В</span><span>займенник</span></div>
+                     <div class="match-option"><span class="option-letter">Г</span><span>сполучник</span></div>
+                     <div class="match-option"><span class="option-letter">Д</span><span>частка</span></div>
+                 </div>
+             </div>
+             <button class="button" style="margin-top: 20px;">Зберегти відповідь</button>
+        </div>
+        
+        <!-- ТИП 3: Завдання відкритої форми (Математика) -->
+        <div class="question-block">
+            <div class="question-title">Завдання 19. В арифметичній прогресії... Обчисліть суму...</div>
+            <label for="short-answer">Уведіть відповідь:</label><br>
+            <input type="text" id="short-answer" class="short-answer-input" placeholder="">
+            <br>
+            <button class="button" style="margin-top: 15px;">Зберегти відповідь</button>
+        </div>
+
+        <!-- ТИП 4: Завдання з вибором КІЛЬКОХ відповідей -->
+        <div class="question-block multi-choice-block">
+            <div class="multi-choice-header">Завдання 28</div>
+            <div class="multi-choice-body">
+                <div class="question-title" style="margin-bottom: 20px;">Укажіть головні ідеї програмних документів Кирило-Мефодіївського братства.</div>
+                <div class="multi-option"><span class="custom-checkbox"></span><span>ліквідація самодержавства, скасування кріпацтва та станового поділу суспільства</span></div>
+                <div class="multi-option"><span class="custom-checkbox"></span><span>створення демократичної федерації слов'янських християнських республік</span></div>
+                <div class="multi-option"><span class="custom-checkbox"></span><span>об'єднання українського та польського рухів у єдиний національно-визвольний рух</span></div>
+                <div class="multi-option"><span class="custom-checkbox"></span><span>утвердження демократичних прав і свобод, рівності усіх громадян перед законом</span></div>
+                <div class="multi-option"><span class="custom-checkbox"></span><span>повалення царизму шляхом військового перевороту або визвольного повстання</span></div>
+                <div class="multi-option"><span class="custom-checkbox"></span><span>здобуття Україною автономії у складі демократичної Російської республіки</span></div>
+                <button class="button" style="margin-top: 20px;">Зберегти відповідь</button>
+            </div>
+        </div>
+
+    </div>
+
+</body>
+</html>
