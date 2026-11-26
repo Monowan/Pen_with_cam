@@ -216,6 +216,10 @@ void handleServerResponse(String response) {
   if (parse_led_script(body) > 0) {
     server_pending_anim = true;
     Serial.printf("[LED] script parsed, %d steps, will run after upload cycle\n", animLen);
+  } else if (body.startsWith("!FAIL")) {
+    // Сервер не зміг упевнено розпізнати завдання — це НЕ відповідь.
+    // LED не чіпаємо, щоб не сплутати відмову з результатом.
+    Serial.println("[AI] no confident answer (refusal), LED untouched");
   } else {
     Serial.println("[LED] no LED script in response (answer only)");
   }
