@@ -1,12 +1,13 @@
 #include "esp_camera.h"
 #include <WiFi.h>
+#include <WiFiClient.h>
 
 // --- Wi-Fi ---
-const char* ssid = "WIFI-CONNECTION-2";
+const char* ssid = "WIFI-CONNECTION-4";
 const char* password = "ur4lwmur4lwm";
 
 // --- Сервер ---
-const char* serverHost = "192.168.1.103";
+const char* serverHost = "192.168.141.2";
 const uint16_t serverPort = 5000;
 const char* serverPath = "/upload";
 
@@ -32,8 +33,8 @@ const char* serverPath = "/upload";
 
 // Пін кнопки для XIAO S3 (зазвичай D1 або вбудована, але для EXT0 краще обрати GPIO з підтримкою RTC)
 // На XIAO S3 кнопка BOOT підключена до GPIO 0.
-#define WAKEUP_PIN GPIO_NUM_0 
-
+//#define WAKEUP_PIN GPIO_NUM_0 
+#define WAKEUP_PIN GPIO_NUM_1
 void configCamera() {
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;

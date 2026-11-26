@@ -6,7 +6,7 @@ const char* ssid = "WIFI-CONNECTION-4";
 const char* password = "ur4lwmur4lwm";
 
 // --- Сервер ---
-const char* serverHost = "192.168.182.112";
+const char* serverHost = "192.168.141.2";
 const uint16_t serverPort = 5000;
 const char* serverPath = "/upload";
 
