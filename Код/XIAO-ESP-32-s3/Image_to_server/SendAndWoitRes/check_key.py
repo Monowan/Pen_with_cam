@@ -1,11 +1,20 @@
 # Перевірка ключа Gemini: чи живий, чи є доступ до моделей, які працюють
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
 
-KEY = sys.argv[1] if len(sys.argv) > 1 else "AIzaSyBLxtfJNp62twqN0AipAizeB1Uyc0fFA7Q"
-BASE = "https://generativelanguage.googleapis.com/v1beta"
+def _key():
+    if len(sys.argv) > 1:
+        return sys.argv[1]
+    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "api_key.txt")
+    if os.path.exists(p):
+        return open(p, encoding="utf-8").read().strip()
+    return os.environ.get("GEMINI_API_KEY", "")
+
+KEY = _key()
+BASE = "https://generativelanguage.googleapis.com/v1beta"   # v1 теж працює, v1beta універсальніша
 
 
 def get(url):
@@ -31,7 +40,7 @@ print(f"   ✓ {len(models)} моделей з generateContent")
 print("   доступні flash/2.5:", [m for m in models if "flash" in m][:10])
 
 # 2) реальний запит до кожної моделі
-model = next((m for m in ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-flash-latest"] if m in models), None)
+model = next((m for m in ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-lite-latest"] if m in models), None)
 if not model:
     print("\n   ✗ немає жодної придатної flash-моделі")
     sys.exit(1)

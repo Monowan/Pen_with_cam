@@ -51,12 +51,17 @@ def load_api_key() -> str:
 
 API_KEY = load_api_key()
 
-# Порядок: перша модель, яка відповість 200, використовується далі
+# Порядок: перша модель, яка відповість 200, використовується далі.
+# Перевірено реальними запитами 2026-11-27: працюють саме ці три.
+# gemini-2.5-flash / 2.0-flash / 2.5-pro — 404 "no longer available to new users".
+# gemini-3.8-flash / 3.7-flash — 503 high demand або таймаут, тримаємо в кінці.
 MODEL_CANDIDATES = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-flash-latest",
-    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash-lite",     # 200, стабільна
+    "gemini-3.1-flash-lite",     # 200, стабільна
+    "gemini-flash-lite-latest",  # 200, стабільна
+    "gemini-3-flash-preview",    # 200 (v1beta)
+    "gemini-3.6-flash",          # 200/503 залежно від навантаження
+    "gemini-3.5-flash",          # 200/503 залежно від навантаження
 ]
 _current_model = {"n": 0}
 
