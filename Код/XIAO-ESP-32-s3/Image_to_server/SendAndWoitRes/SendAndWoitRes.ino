@@ -3,6 +3,17 @@
 #include <WiFiClient.h>
 #include "driver/ledc.h"
 
+// --- Типи LED-скрипта: ОГОЛОШЕНІ ДО БУДЬ-ЯКИХ ФУНКЦІЙ ---
+enum AnimMode { AM_ON, AM_BLINK, AM_SPARK };
+
+struct LedStep {
+  uint8_t  r, g, b;      // яскравість 0-100
+  AnimMode mode;
+  uint32_t ms;           // ON/BL: тривалість кроку; SP: тривалість спалаху
+  uint32_t gap;          // SP: пауза між спалахами
+  uint16_t reps;         // SP: кількість спалахів
+};
+
 // --- Wi-Fi ---
 const char* ssid = "WIFI-CONNECTION-4";
 const char* password = "ur4lwmur4lwm";
@@ -72,17 +83,27 @@ static void setup_led_pwm() {
   }
 }
 
-static void set_led_ch(ledc_channel_t ch, int percent) {
+void set_led_ch(ledc_channel_t ch, int percent) {
   if (percent > 100) percent = 100;
   if (percent < 0)   percent = 0;
   ledc_set_duty(LEDC_LOW_SPEED_MODE, ch, (uint32_t)percent * 255 / 100);
   ledc_update_duty(LEDC_LOW_SPEED_MODE, ch);
 }
 
+// Прототипи: викликаються до свого визначення
+void set_brightness(int r, int g, int b);
+void feed_wdt();
+
 void set_brightness(int r, int g, int b) {
   set_led_ch(CH_R, r);
   set_led_ch(CH_G, g);
   set_led_ch(CH_B, b);
+}
+
+// Віддає квант часу системі під час довгих анімацій:
+// не дає спрацювати task watchdog, якщо він увімкнений у Tools.
+void feed_wdt() {
+  yield();
 }
 
 // ===========================================================================
@@ -172,6 +193,8 @@ void configCamera() {
 // Будь-який інший текст (наприклад "3" або "1 4 5") просто логується, LED не чіпає.
 // ===========================================================================
 
+
+
 #define LED_MS_MIN  30UL
 #define LED_MS_MAX  30000UL
 #define LED_MAX_STEPS 12          // максимум кроків алгоритму за один удар
@@ -179,18 +202,24 @@ void configCamera() {
 
 bool server_pending_anim = false;     // знайдено валідний LED-рядок -> треба відтворити
 
-enum AnimMode { AM_ON, AM_BLINK, AM_SPARK };
-
-struct LedStep {
-  uint8_t  r, g, b;      // яскравість 0-100
-  AnimMode mode;
-  uint32_t ms;           // ON/BL: тривалість кроку; SP: тривалість спалаху
-  uint32_t gap;          // SP: пауза між спалахами
-  uint16_t reps;         // SP: кількість спалахів
-};
-
 LedStep anim[LED_MAX_STEPS];
 int     animLen = 0;
+
+void handleServerResponse(String response) {
+  Serial.println("Server response:");
+  Serial.println(response);
+
+  // Тіло відповіді може йти після заголовків — відрізаємо все до \r\n\r\n
+  int hdr_end = response.indexOf("\r\n\r\n");
+  String body = (hdr_end >= 0) ? response.substring(hdr_end + 4) : response;
+
+  if (parse_led_script(body) > 0) {
+    server_pending_anim = true;
+    Serial.printf("[LED] script parsed, %d steps, will run after upload cycle\n", animLen);
+  } else {
+    Serial.println("[LED] no LED script in response (answer only)");
+  }
+}
 
 // --- Розбір ---
 static bool parse_color(const String& s, uint8_t* r, uint8_t* g, uint8_t* b) {
@@ -306,26 +335,15 @@ void led_play_anim() {
   Serial.printf("[LED] playing %d step(s)\n", animLen);
   for (int i = 0; i < animLen; i++) {
     led_play(anim[i]);
+    // Годуємо watchdog і тримаємо таймер простою живим, поки триває анімація
+    feed_wdt();
+    lastActivityMs = millis();
   }
   set_brightness(0, 0, 0);
   Serial.println("[LED] done");
 }
 
-void handleServerResponse(String response) {
-  Serial.println("Server response:");
-  Serial.println(response);
 
-  // BMC-payload може йти після заголовків — беремо тіло
-  int hdr_end = response.indexOf("\r\n\r\n");
-  String body = (hdr_end >= 0) ? response.substring(hdr_end + 4) : response;
-
-  if (parse_led_script(body) > 0) {
-    server_pending_anim = true;
-    Serial.printf("[LED] script parsed, %d steps, will run after upload cycle\n", animLen);
-  } else {
-    Serial.println("[LED] no LED script in response (answer only)");
-  }
-}
 
 // Wi-Fi під'єднується один раз і тримається до глибокого сну.
 bool wifi_ensure() {
