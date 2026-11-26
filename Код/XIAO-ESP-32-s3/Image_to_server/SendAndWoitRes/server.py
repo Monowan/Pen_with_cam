@@ -35,21 +35,33 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(HERE, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-FALLBACK_KEY = "AIzaSyBLxtfJNp62twqN0AipAizeB1Uyc0fFA7Q"
+# Пріоритет джерел ключа (перший непорожній перемагає):
+#   1) змінна середовища GEMINI_API_KEY
+#   2) файл api_key.txt поруч зі скриптом (у .gitignore, git його не чіпає)
+#   3) ~/.gemini_api_key (спільний для всіх клонів репозиторію)
+# Ключа в коді НЕМАЄ навмисно: інакше git при кожному pull/merge
+# повертав би старий закомічений рядок — саме те, чого треба уникнути.
+KEY_FILES = [
+    os.path.join(HERE, "api_key.txt"),
+    os.path.expanduser("~/.gemini_api_key"),
+]
 
 
 def load_api_key() -> str:
+    """Повертає (ключ, опис джерела)."""
     key = os.environ.get("GEMINI_API_KEY", "").strip()
     if key:
-        return key
-    p = os.path.join(HERE, "api_key.txt")
-    if os.path.exists(p):
-        with open(p, encoding="utf-8") as f:
-            return f.read().strip()
-    return FALLBACK_KEY
+        return key, "env GEMINI_API_KEY"
+    for p in KEY_FILES:
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as f:
+                key = f.read().strip()
+            if key:
+                return key, p
+    return "", "немає"
 
 
-API_KEY = load_api_key()
+API_KEY, KEY_SOURCE = load_api_key()
 
 # Порядок: перша модель, яка відповість 200, використовується далі.
 # Перевірено реальними запитами 2026-11-27: працюють саме ці три.
@@ -88,6 +100,11 @@ app = Flask(__name__)
 # ---------------------------------------------------------------------------
 def call_gemini_once(model: str, image_bytes: bytes, mime: str = "image/jpeg"):
     """Повертає (status_code, parsed_or_raw)."""
+    if not API_KEY:
+        raise RuntimeError(
+            "API-ключ не задано. Поклади його в api_key.txt поруч зі скриптом, "
+            "~/.gemini_api_key або в змінну середовища GEMINI_API_KEY."
+        )
     url = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
         f"{model}:generateContent?key={API_KEY}"
@@ -213,7 +230,11 @@ if __name__ == "__main__":
     if not HAVE_PIL:
         print("[!] Pillow не встановлено — пропускаю перевірку цілісності зображень")
     print(f"[i] UPLOAD_DIR = {UPLOAD_DIR}")
-    print(f"[i] ключ: {'з env' if os.environ.get('GEMINI_API_KEY') else ('з api_key.txt' if os.path.exists(os.path.join(HERE, 'api_key.txt')) else 'fallback у коді')}")
+    if API_KEY:
+        print(f"[i] ключ: {KEY_SOURCE} ({API_KEY[:6]}...{API_KEY[-4:]})")
+    else:
+        print("[!] API-ключ не задано. Поклади його у api_key.txt поруч зі скриптом,")
+        print("    у ~/.gemini_api_key або в змінну GEMINI_API_KEY.")
     print("[i] слухаю 0.0.0.0:5000")
     # Для локальної мережі з ручки: не включати reloader/debug
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)

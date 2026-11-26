@@ -1,0 +1,3 @@
+# Скопіюй цей файл у api_key.txt (він у .gitignore) і встав свій ключ одним рядком.
+# Ключ: https://aistudio.google.com/apikey
+PASTE_YOUR_GEMINI_API_KEY_HERE
