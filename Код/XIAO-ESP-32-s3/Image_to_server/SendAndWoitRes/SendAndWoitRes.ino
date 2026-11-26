@@ -1,6 +1,7 @@
 #include "esp_camera.h"
 #include <WiFi.h>
 #include <WiFiClient.h>
+#include "driver/ledc.h"
 
 // --- Wi-Fi ---
 const char* ssid = "WIFI-CONNECTION-4";
@@ -35,6 +36,68 @@ const char* serverPath = "/upload";
 // На XIAO S3 кнопка BOOT підключена до GPIO 0.
 //#define WAKEUP_PIN GPIO_NUM_0 
 #define WAKEUP_PIN GPIO_NUM_1
+
+// ===========================================================================
+//  RGB СВІТЛОДІОДИ — апаратний ШІМ ESP-IDF (як у проєкті Led_test)
+// ===========================================================================
+#define LED_RED   GPIO_NUM_8
+#define LED_GREEN GPIO_NUM_9
+#define LED_BLUE  GPIO_NUM_7
+
+#define CH_R LEDC_CHANNEL_1
+#define CH_G LEDC_CHANNEL_2
+#define CH_B LEDC_CHANNEL_3
+
+static void setup_led_pwm() {
+  ledc_timer_config_t t = {};
+  t.speed_mode      = LEDC_LOW_SPEED_MODE;   // ESP32-S3: тільки Low Speed
+  t.duty_resolution = LEDC_TIMER_8_BIT;      // 0-255
+  t.timer_num       = LEDC_TIMER_1;          // TIMER_0 зайнятий камерою
+  t.freq_hz         = 5000;
+  t.clk_cfg         = LEDC_AUTO_CLK;
+  ledc_timer_config(&t);
+
+  const int pins[3] = { LED_RED, LED_GREEN, LED_BLUE };
+  const ledc_channel_t chans[3] = { CH_R, CH_G, CH_B };
+  for (int i = 0; i < 3; i++) {
+    ledc_channel_config_t c = {};   // ОБОВ'ЯЗКОВО нульова ініціалізація
+    c.gpio_num   = pins[i];
+    c.speed_mode = LEDC_LOW_SPEED_MODE;
+    c.channel    = chans[i];
+    c.intr_type  = LEDC_INTR_DISABLE;
+    c.timer_sel  = LEDC_TIMER_1;
+    c.duty       = 0;
+    c.hpoint     = 0;
+    ledc_channel_config(&c);
+  }
+}
+
+static void set_led_ch(ledc_channel_t ch, int percent) {
+  if (percent > 100) percent = 100;
+  if (percent < 0)   percent = 0;
+  ledc_set_duty(LEDC_LOW_SPEED_MODE, ch, (uint32_t)percent * 255 / 100);
+  ledc_update_duty(LEDC_LOW_SPEED_MODE, ch);
+}
+
+void set_brightness(int r, int g, int b) {
+  set_led_ch(CH_R, r);
+  set_led_ch(CH_G, g);
+  set_led_ch(CH_B, b);
+}
+
+// ===========================================================================
+// --- Таймер бездіяльності ---
+const unsigned long IDLE_SLEEP_MS = 60000UL;   // 1 хв без натискань -> deep sleep
+const unsigned long DEBOUNCE_MS   = 50;        // антибрязкіт кнопки
+
+// --- Стан ---
+bool          wakeup_ready   = false;  // ВАЖЛИВО: вже "розбудились" і обробили одне фото
+bool          cameraStarted  = false;
+bool          btnStable      = false;  // true = натиснута
+bool          btnLastRaw     = false;
+unsigned long btnRawChangeMs = 0;
+unsigned long lastActivityMs = 0;
+
 void configCamera() {
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -82,32 +145,195 @@ void configCamera() {
     s->set_whitebal(s, 1);
     s->set_ae_level(s, 0);
   }
+  cameraStarted = true;
+}
+
+// ===========================================================================
+//  ОБРОБНИК ВІДПОВІДІ СЕРВЕРА + СВІТЛОДІОДНА АНІМАЦІЯ
+// ===========================================================================
+// Формат рядка (регістр не важливий, пробіли довільні), розділювач кроків ';':
+//
+//   LED:<колір>:<режим>:<мс>[:<пауза>[:<повтори>]] ; <наступний крок> ; ...
+//
+//   колір  : R | G | B | W | Y | C | M        (R/G/B = піни 8/9/7, W = всі три)
+//   режим  : ON   — світиться постійно протягом <мс>
+//            BL   — миготіння із заданим періодом <мс> (повний період)
+//            SP   — спалах <мс> світла + <пауза> темряви, повторити <повтори> разів
+//   мс     : час у мілісекундах (для SP — тривалість самого спалаху)
+//   пауза  : тільки для SP, мс темряви між спалахами (за замовч. = мс)
+//   повтори: тільки для SP, скільки разів (за замовч. 1)
+//
+// Приймається або "LED:..." або коротке "R:ON:500".
+// Розмір поза межами 30 мс..30 с обрізається.
+//
+// Приклад (алгоритм із 4 кроків):
+//   LED:R:ON:300;LED:G:ON:300;LED:B:ON:300;LED:W:SP:100:200:3
+//
+// Будь-який інший текст (наприклад "3" або "1 4 5") просто логується, LED не чіпає.
+// ===========================================================================
+
+#define LED_MS_MIN  30UL
+#define LED_MS_MAX  30000UL
+#define LED_MAX_STEPS 12          // максимум кроків алгоритму за один удар
+#define LED_DEFAULT_BRIGHT 100    // яскравість для BL/SP (у Led_test 45/100/20)
+
+bool server_pending_anim = false;     // знайдено валідний LED-рядок -> треба відтворити
+
+enum AnimMode { AM_ON, AM_BLINK, AM_SPARK };
+
+struct LedStep {
+  uint8_t  r, g, b;      // яскравість 0-100
+  AnimMode mode;
+  uint32_t ms;           // ON/BL: тривалість кроку; SP: тривалість спалаху
+  uint32_t gap;          // SP: пауза між спалахами
+  uint16_t reps;         // SP: кількість спалахів
+};
+
+LedStep anim[LED_MAX_STEPS];
+int     animLen = 0;
+
+// --- Розбір ---
+static bool parse_color(const String& s, uint8_t* r, uint8_t* g, uint8_t* b) {
+  if (s == "R") { *r = 45;  *g = 0;   *b = 0;   }   // яскравості як у Led_test
+  else if (s == "G") { *r = 0;   *g = 100; *b = 0; }
+  else if (s == "B") { *r = 0;   *g = 0;   *b = 20;  }
+  else if (s == "W") { *r = 45;  *g = 100; *b = 20;  }
+  else if (s == "Y") { *r = 45;  *g = 100; *b = 0;   }
+  else if (s == "C") { *r = 0;   *g = 100; *b = 20;  }
+  else if (s == "M") { *r = 45;  *g = 0;   *b = 20;  }
+  else return false;
+  return true;
+}
+
+static void trim_upper(String& s) {
+  s.trim();
+  s.toUpperCase();
+}
+
+static bool parse_step(String tok, LedStep* out) {
+  // токен виду "R:ON:300" або з префіксом "LED:"
+  trim_upper(tok);
+  if (tok.startsWith("LED:")) tok = tok.substring(4);
+
+  // розбиваємо на поля по ':'
+  String f[5];
+  int nf = 0, from = 0;
+  while (nf < 5) {
+    int p = tok.indexOf(':', from);
+    if (p < 0) { f[nf++] = tok.substring(from); break; }
+    f[nf++] = tok.substring(from, p);
+    from = p + 1;
+  }
+  if (nf < 3) return false;
+
+  if (!parse_color(f[0], &out->r, &out->g, &out->b)) return false;
+
+  const String& m = f[1];
+  if (m == "ON" || m == "BL") {
+    if (m == "ON") out->mode = AM_ON; else out->mode = AM_BLINK;
+    out->ms   = f[2].toInt();
+    out->gap  = out->ms;
+    out->reps = 1;
+  } else if (m == "SP") {
+    out->mode = AM_SPARK;
+    out->ms   = f[2].toInt();
+    out->gap  = (nf > 3 && f[3].length()) ? f[3].toInt() : out->ms;
+    out->reps = (nf > 4 && f[4].length()) ? f[4].toInt() : 1;
+    if (out->reps == 0) out->reps = 1;
+  } else {
+    return false;
+  }
+
+  if (out->ms < LED_MS_MIN) out->ms = LED_MS_MIN;
+  if (out->ms > LED_MS_MAX) out->ms = LED_MS_MAX;
+  if (out->gap < LED_MS_MIN) out->gap = LED_MS_MIN;
+  if (out->gap > LED_MS_MAX) out->gap = LED_MS_MAX;
+  return true;
+}
+
+// Парсер усього рядка -> anim[]. Повертає кількість кроків (0 = не той формат).
+int parse_led_script(const String& text) {
+  animLen = 0;
+  if (text.indexOf("LED:") < 0 && text.indexOf("ON:") < 0 && text.indexOf("SP:") < 0) {
+    return 0;
+  }
+
+  int from = 0;
+  while (animLen < LED_MAX_STEPS && from <= (int)text.length()) {
+    int p = text.indexOf(';', from);
+    String tok = (p < 0) ? text.substring(from) : text.substring(from, p);
+    from = (p < 0) ? text.length() + 1 : p + 1;
+
+    trim_upper(tok);
+    if (tok.length() == 0) continue;
+
+    LedStep st;
+    if (parse_step(tok, &st)) {
+      anim[animLen++] = st;
+    }
+  }
+  return animLen;
+}
+
+// --- Відтворення ---
+void led_play(const LedStep& st) {
+  switch (st.mode) {
+    case AM_ON:
+      set_brightness(st.r, st.g, st.b);
+      delay(st.ms);
+      break;
+
+    case AM_BLINK: {
+      // <мс> = повний період: половина світла, половина темряви
+      uint32_t half = st.ms / 2;
+      if (half < LED_MS_MIN / 2) half = LED_MS_MIN / 2;
+      set_brightness(st.r, st.g, st.b); delay(half);
+      set_brightness(0, 0, 0);          delay(half);
+      break;
+    }
+
+    case AM_SPARK:
+      for (uint16_t k = 0; k < st.reps; k++) {
+        set_brightness(st.r, st.g, st.b); delay(st.ms);
+        set_brightness(0, 0, 0);          delay(st.gap);
+      }
+      break;
+  }
+  set_brightness(0, 0, 0);
+}
+
+void led_play_anim() {
+  Serial.printf("[LED] playing %d step(s)\n", animLen);
+  for (int i = 0; i < animLen; i++) {
+    led_play(anim[i]);
+  }
+  set_brightness(0, 0, 0);
+  Serial.println("[LED] done");
 }
 
 void handleServerResponse(String response) {
   Serial.println("Server response:");
   Serial.println(response);
+
+  // BMC-payload може йти після заголовків — беремо тіло
+  int hdr_end = response.indexOf("\r\n\r\n");
+  String body = (hdr_end >= 0) ? response.substring(hdr_end + 4) : response;
+
+  if (parse_led_script(body) > 0) {
+    server_pending_anim = true;
+    Serial.printf("[LED] script parsed, %d steps, will run after upload cycle\n", animLen);
+  } else {
+    Serial.println("[LED] no LED script in response (answer only)");
+  }
 }
 
-void setup() {
-  Serial.begin(115200);
-  // S3 іноді потребує паузи для ініціалізації USB Serial
-  delay(1000); 
+// Wi-Fi під'єднується один раз і тримається до глибокого сну.
+bool wifi_ensure() {
+  if (WiFi.status() == WL_CONNECTED) return true;
 
-  // --- BUTTON WAKEUP ---
-  // На XIAO S3 кнопка BOOT на GPIO 0
-  esp_sleep_enable_ext0_wakeup(WAKEUP_PIN, 0); 
-
-  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT0) {
-    Serial.println("Normal boot. Entering Deep Sleep (press BOOT button)...");
-    delay(100);
-    esp_deep_sleep_start();
-  }
-
-  Serial.println("Wakeup by button!");
-
-  // --- Wi-Fi ---
   Serial.printf("Connecting to %s", ssid);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);          // без modem-sleep — стабільніше з'єднання
   WiFi.begin(ssid, password);
   unsigned long startTime = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - startTime < 15000) {
@@ -116,21 +342,35 @@ void setup() {
   }
 
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("\nWiFi connection failed!");
-    esp_deep_sleep_start();
+    Serial.println("\nWiFi connection failed! (retry next press)");
+    return false;
   }
   Serial.printf("\nWiFi connected! IP: %s\n", WiFi.localIP().toString().c_str());
+  return true;
+}
 
-  // --- Camera ---
-  configCamera();
-  Serial.println("Camera ready");
-  delay(1000); // Час для автоекспозиції
+// Один повний цикл: (Wi-Fi вже є) -> фото -> upload.
+// Wi-Fi НЕ вимикається: з'єднання живе до глибокого сну.
+// Повертає true, якщо досягли кінця (успішно чи ні — не важливо).
+// Сам по собі НЕ засинає.
+bool do_capture_cycle() {
+  // --- Wi-Fi ---
+  if (!wifi_ensure()) {
+    return false;
+  }
+
+  // --- Camera (лише перший раз) ---
+  if (!cameraStarted) {
+    configCamera();
+    Serial.println("Camera ready");
+    delay(1000); // Час для автоекспозиції
+  }
 
   // --- Capture ---
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("Camera capture failed");
-    esp_deep_sleep_start();
+    return false;
   }
 
   Serial.printf("Picture taken! Size: %zu bytes\n", fb->len);
@@ -154,7 +394,7 @@ void setup() {
     size_t sent = 0;
     uint8_t *buf = fb->buf;
     size_t len = fb->len;
-    
+
     while (sent < len) {
       size_t toSend = (len - sent > 1024) ? 1024 : (len - sent);
       client.write(buf + sent, toSend);
@@ -176,13 +416,95 @@ void setup() {
 
   esp_camera_fb_return(fb);
 
-  // --- Power off sequence ---
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_OFF);
-  Serial.println("Going to deep sleep...");
-  delay(500);
-
-  esp_deep_sleep_start();
+  return true;
 }
 
-void loop() {}
+// ---------------------------------------------------------------------------
+void setup() {
+  Serial.begin(115200);
+  // S3 іноді потребує паузи для ініціалізації USB Serial
+  delay(1000); 
+
+  pinMode(WAKEUP_PIN, INPUT_PULLUP);
+  btnLastRaw = (digitalRead(WAKEUP_PIN) == LOW);
+  btnStable  = btnLastRaw;
+
+  setup_led_pwm();          // RGB LED через ledc
+  set_brightness(0, 0, 0);
+
+  // --- BUTTON WAKEUP ---
+  // На XIAO S3 кнопка BOOT на GPIO 0
+  esp_sleep_enable_ext0_wakeup(WAKEUP_PIN, 0); 
+
+  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_EXT0) {
+    Serial.println("Normal boot. Entering Deep Sleep (press BOOT button)...");
+    Serial.flush();
+    delay(100);
+    esp_deep_sleep_start();
+  }
+
+  Serial.println("Wakeup by button!");
+  wakeup_ready = true;
+
+  // Wi-Fi піднімаємо одразу після пробудження і тримаємо до глибокого сну
+  wifi_ensure();
+
+  // Перше фото одразу після пробудження — як було
+  do_capture_cycle();
+
+  // Таймер бездіяльності стартує після завершення циклу
+  lastActivityMs = millis();
+  Serial.printf("Idle timer started: sleep after %lu s без натискань; WiFi %s\n",
+                IDLE_SLEEP_MS / 1000,
+                WiFi.status() == WL_CONNECTED ? "CONNECTED (kept alive)" : "offline");
+}
+
+void loop() {
+  // --- Кнопка: коротке натискання = ще одне фото (без сну) ---
+  bool raw = (digitalRead(WAKEUP_PIN) == LOW);
+  unsigned long now = millis();
+  if (raw != btnLastRaw) {
+    btnLastRaw = raw;
+    btnRawChangeMs = now;
+  }
+  if ((now - btnRawChangeMs) >= DEBOUNCE_MS && raw != btnStable) {
+    btnStable = raw;
+    if (!btnStable) {
+      // Відпускання = натискання (як у вихідній логіці — кнопка на GND)
+      Serial.println("[BTN] pressed -> capture again");
+      do_capture_cycle();
+      Serial.printf("[NET] WiFi still %s\n",
+                    WiFi.status() == WL_CONNECTED ? "connected" : "disconnected");
+
+      // Якщо сервер прислав алгоритм блимання — відтворюємо його
+      if (server_pending_anim) {
+        server_pending_anim = false;
+        led_play_anim();
+        Serial.println("[LED] animation finished");
+      }
+    }
+    lastActivityMs = millis();
+  }
+
+  // Якщо зв'язок все ж впав (роутер перезавантажився) — тихо відновлюємо,
+  // не чекаючи наступного натискання
+  if (WiFi.status() != WL_CONNECTED && (millis() - lastActivityMs) < IDLE_SLEEP_MS) {
+    static unsigned long lastRetry = 0;
+    if (now - lastRetry > 5000) {
+      lastRetry = now;
+      Serial.println("[NET] WiFi lost -> reconnect");
+      wifi_ensure();
+    }
+  }
+
+  // --- Сон ТІЛЬКИ за таймером бездіяльності ---
+  if (millis() - lastActivityMs >= IDLE_SLEEP_MS) {
+    Serial.printf("No activity for %lu s -> going to deep sleep...\n", IDLE_SLEEP_MS / 1000);
+    Serial.flush();
+    delay(50);
+    esp_sleep_enable_ext0_wakeup(WAKEUP_PIN, 0);
+    esp_deep_sleep_start();
+  }
+
+  delay(10);
+}
