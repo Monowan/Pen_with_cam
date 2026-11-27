@@ -190,6 +190,7 @@ void configCamera() {
     s->set_ae_level(s, -2);    // компенсація експозиції -2 (-2..2)
     s->set_raw_gma(s, 0);      // GMA (гама) вимкнена
     s->set_whitebal(s, 1);
+    s->set_hmirror(s, 1);      // дзеркально по горизонталі (ліво <-> право)
   }
   cameraStarted = true;
 }
