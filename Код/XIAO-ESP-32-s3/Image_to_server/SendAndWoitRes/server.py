@@ -10,6 +10,7 @@
 #
 # API-ключ: змінна середовища GEMINI_API_KEY, або api_key.txt поруч зі скриптом,
 # або прямий рядок нижче (запасний варіант для швидкого старту).
+import logging
 import os
 import sys
 import time
@@ -127,6 +128,16 @@ PROMPT = (
 
 app = Flask(__name__)
 
+# Без цього app.logger.info(...) тоне — видно лише WARNING і гірше.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+app.logger.setLevel(logging.INFO)
+
+if not logging.getLogger().handlers or logging.getLogger().level > logging.INFO:
+    app.logger.warning("logging INFO not enabled — model/answer lines will be hidden")
+
 
 # ---------------------------------------------------------------------------
 # Gemini REST
@@ -230,6 +241,46 @@ def normalize_answer(raw: str) -> str:
     return t
 
 
+def image_sharpness(image_bytes: bytes) -> float:
+    """Оцінка різкості: дисперсія лапласіана (чим більше — тим різкіше).
+
+    Потрібна, щоб із кількох кадрів ручки вибрати найменш змазаний.
+    Без Pillow або на битому файлі повертає 0.0 — тоді вибір іде за розміром.
+    """
+    if not HAVE_PIL:
+        return 0.0
+    try:
+        import io
+        import statistics
+        from PIL import Image, ImageFilter
+        with Image.open(io.BytesIO(image_bytes)) as im:
+            g = im.convert("L")
+            # зменшуємо великі кадри: оцінка не залежить від роздільності
+            if max(g.size) > 640:
+                k = 640 / max(g.size)
+                g = g.resize((max(1, int(g.width * k)), max(1, int(g.height * k))))
+            lap = g.filter(ImageFilter.Kernel((3, 3), (0, 1, 0, 1, -4, 1, 0, 1, 0), scale=1, offset=128))
+            hist = lap.histogram()
+        total = sum(hist)
+        if not total:
+            return 0.0
+        mean = sum(i * c for i, c in enumerate(hist)) / total
+        var = sum((i - mean) ** 2 * c for i, c in enumerate(hist)) / total
+        return var
+    except Exception:
+        return 0.0
+
+
+def pick_best_frame(frames):
+    """Повертає (найкращий кадр, список оцінок, індекс)."""
+    scores = [image_sharpness(f) for f in frames]
+    best = 0
+    for i, sc in enumerate(scores):
+        if sc > scores[best]:
+            best = i
+    return frames[best], scores, best
+
+
 def call_gemini(image_bytes: bytes, mime: str = "image/jpeg"):
     """Пробує моделі по колу і повертає відповідь ЛИШЕ за згодою (кворумом).
 
@@ -308,35 +359,77 @@ def health():
 
 @app.route("/upload", methods=["POST"])
 def upload_and_analyze():
-    data = request.get_data()
-    if not data:
+    """Приймає ОДИН JPEG (старий протокол) або КІЛЬКА кадрів у multipart.
+
+    Ручка надсилає multipart/form-data з полями image0, image1, ... — сервер
+    оцінює різкість кожного й бере найкращий, решту зберігає як *_alt.jpg.
+    """
+    frames = []
+
+    # Тіло читаємо ПЕРШИМ і з кешем: після звернення до request.files
+    # сирий потік уже спожитий, і get_data() повертає порожньо.
+    raw_body = request.get_data(cache=True)
+
+    if request.files:
+        # multipart: поля image0..imageN
+        for key in sorted(request.files.keys(), key=lambda k: (len(k), k)):
+            f = request.files[key]
+            data = f.read()
+            if data:
+                frames.append((f.filename or key, data))
+
+    if not frames and raw_body:
+        # старий протокол: сирий JPEG у тілі
+        frames.append((None, raw_body))
+
+    if not frames:
+        app.logger.warning("upload: no frames (files=%s body=%d bytes)",
+                           list(request.files.keys()), len(raw_body))
         return "Empty body", 400
 
-    if not (len(data) >= 2 and data[0] == 0xFF and data[1] == 0xD8):
-        app.logger.warning("body does not start with JPEG SOI (0xFFD8)")
-        return "Not a JPEG", 400
-
-    path = os.path.join(UPLOAD_DIR, make_filename())
-    try:
-        with open(path, "wb") as f:
-            f.write(data)
-    except Exception as e:
-        app.logger.error("write failed: %s", e)
-        return "Write failed", 500
-
-    if HAVE_PIL:
+    saved = []
+    for name, data in frames:
+        if not data:
+            continue
+        if not (len(data) >= 2 and data[0] == 0xFF and data[1] == 0xD8):
+            app.logger.warning("frame does not start with JPEG SOI (0xFFD8)")
+            return "Not a JPEG", 400
+        path = os.path.join(UPLOAD_DIR, make_filename())
         try:
-            from PIL import Image
-            with Image.open(path) as im:
-                im.verify()
+            with open(path, "wb") as fh:
+                fh.write(data)
         except Exception as e:
-            app.logger.error("invalid image: %s", e)
-            return "Invalid image", 400
+            app.logger.error("write failed: %s", e)
+            return "Write failed", 500
+        if HAVE_PIL:
+            try:
+                from PIL import Image
+                with Image.open(path) as im:
+                    im.verify()
+            except Exception as e:
+                app.logger.error("invalid image %s: %s", path, e)
+                return "Invalid image", 400
+        saved.append((path, data))
+
+    best_data = saved[0][1] if len(saved) == 1 else None
+    if len(saved) > 1:
+        best_data, scores, best_idx = pick_best_frame([d for _, d in saved])
+        app.logger.info("frames sharpness: %s -> pick #%d",
+                        ["%.1f" % sc for sc in scores], best_idx + 1)
+        # перейменовуємо, щоб зрозуміти у дампах, який кадр обрано
+        for i, (path, _) in enumerate(saved):
+            if i == best_idx:
+                continue
+            base, ext = os.path.splitext(path)
+            try:
+                os.rename(path, base + "_alt" + ext)
+            except Exception:
+                pass
 
     t0 = time.time()
-    answer = call_gemini(data)
-    app.logger.info("upload %s bytes=%d in %.1fs -> %s",
-                    os.path.basename(path), len(data), time.time() - t0, answer[:80])
+    answer = call_gemini(best_data)
+    app.logger.info("upload frames=%d in %.1fs -> %s",
+                    len(saved), time.time() - t0, answer[:80])
     return answer, 200
 
 

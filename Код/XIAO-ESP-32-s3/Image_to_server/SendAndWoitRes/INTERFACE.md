@@ -16,18 +16,31 @@ ESP надсилає **один HTTP-запит** і читає **всю від�
 ```
 POST /upload HTTP/1.1
 Host: <IP сервера>
-Content-Type: image/jpeg
-Content-Length: <розмір кадру>
+Content-Type: multipart/form-data; boundary=----PTB<hex>
+Content-Length: <довжина тіла>
 Connection: close
 
-<бінарний JPEG>
+------PTB<hex>
+Content-Disposition: form-data; name="image0"; filename="shot0.jpg"
+Content-Type: image/jpeg
+
+<бінарний JPEG кадру 1>
+------PTB<hex>
+Content-Disposition: form-data; name="image1"; filename="shot1.jpg"
+Content-Type: image/jpeg
+
+<бінарний JPEG кадру 2>
+------PTB<hex>--
 ```
+
+Сервер також приймає старий формат — **сирий JPEG у тілі** без multipart
+(корисно для `curl --data-binary` і ручних тестів).
 
 | Параметр | Значення |
 |---|---|
 | Метод | `POST` |
 | Шлях | `/upload` |
-| Тіло | JPEG (FHD 1920×1080, quality 30) |
+| Тіло | `multipart/form-data`, поля `image0`, `image1`, … (JPEG, FHD, quality 30) |
 | Кодування відповіді | UTF-8, `text/plain` |
 | Таймаут TCP | 15 с |
 | Час очікування Wi-Fi | 15 с |
@@ -119,6 +132,10 @@ Server response:
 Кожен **успішно** зроблений кадр сигналізується **дуже коротким бліком
 червоного — 40 мс** (`SHOT_BLINK_MS`, `blink_shot()`), після чого LED гаситься.
 Два кадри = два короткі блики.
+
+**Що йде на сервер:** усі зняті кадри в одному multipart-запиті. Сервер
+оцінює різкість кожного (дисперсія лапласіана після зменшення до 640 px) і
+надсилає в Gemini **найрізкіший**; решта зберігаються з суфіксом `_alt.jpg`.
 
 Схема LED-сигналів:
 

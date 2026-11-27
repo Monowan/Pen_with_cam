@@ -421,31 +421,53 @@ bool do_capture_cycle() {
     delay(1000); // Час для автоекспозиції
   }
 
-  // --- Capture (кілька кадрів підряд) ---
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb) {
+  // --- Capture (кілька кадрів підряд, усі йдуть на сервер) ---
+  camera_fb_t *frames[SHOT_COUNT];
+  int shotCount = 0;
+
+  for (int i = 0; i < SHOT_COUNT; i++) {
+    if (i > 0) delay(SHOT_GAP_MS);
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+      Serial.printf("Picture %d/%d failed\n", i + 1, SHOT_COUNT);
+      break;
+    }
+    frames[shotCount++] = fb;
+    Serial.printf("Picture %d/%d taken! Size: %zu bytes\n", i + 1, SHOT_COUNT, fb->len);
+    blink_shot();   // коротюсінький блік: кадр реально зроблено
+  }
+
+  if (shotCount == 0) {
     Serial.println("Camera capture failed");
     return false;
   }
-  Serial.printf("Picture 1/%d taken! Size: %zu bytes\n", SHOT_COUNT, fb->len);
-  blink_shot();   // коротюсінький блік: кадр реально зроблено
 
-  for (int i = 1; i < SHOT_COUNT; i++) {
-    delay(SHOT_GAP_MS);
-    camera_fb_t *next = esp_camera_fb_get();
-    if (!next) {
-      Serial.printf("Picture %d/%d failed, using previous\n", i + 1, SHOT_COUNT);
-      break;
+  // Звільняємо всі буфери на будь-якому виході з функції
+  auto release_frames = [&]() {
+    for (int i = 0; i < shotCount; i++) {
+      if (frames[i]) { esp_camera_fb_return(frames[i]); frames[i] = nullptr; }
     }
-    esp_camera_fb_return(fb);   // попередній більше не потрібен
-    fb = next;
-    Serial.printf("Picture %d/%d taken! Size: %zu bytes\n", i + 1, SHOT_COUNT, fb->len);
-    blink_shot();
-  }
+  };
 
-  // --- Upload ---
+  // --- Upload (multipart/form-data, усі кадри в одному запиті) ---
   WiFiClient client;
   client.setTimeout(15000); // Збільшено для FHD
+
+  // Межова лінія multipart і попередній підрахунок Content-Length,
+  // щоб надіслати один запит без chunked-кодування.
+  String boundary = "----PTB" + String((unsigned long)millis(), HEX);
+  size_t bodyLen = 0;
+  for (int i = 0; i < shotCount; i++) {
+    char head[160];
+    int n = snprintf(head, sizeof(head),
+                     "--%s\r\nContent-Disposition: form-data; name=\"image%d\"; "
+                     "filename=\"shot%d.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n",
+                     boundary.c_str(), i, i);
+    bodyLen += (size_t)n + frames[i]->len + 2;   // + CRLF після даних
+  }
+  // "--" + boundary + "--\r\n" = 2 + len + 2 + 2
+  size_t tailLen = boundary.length() + 6;
+  bodyLen += tailLen;
 
   Serial.printf("Connecting to server %s:%d...\n", serverHost, serverPort);
   if (!client.connect(serverHost, serverPort)) {
@@ -453,22 +475,33 @@ bool do_capture_cycle() {
   } else {
     client.printf("POST %s HTTP/1.1\r\n", serverPath);
     client.printf("Host: %s\r\n", serverHost);
-    client.println("Content-Type: image/jpeg");
-    client.printf("Content-Length: %zu\r\n", fb->len);
+    client.printf("Content-Type: multipart/form-data; boundary=%s\r\n", boundary.c_str());
+    client.printf("Content-Length: %zu\r\n", bodyLen);
     client.println("Connection: close");
     client.println();
 
-    // Передаємо дані прямо з буфера камери без malloc (економимо пам'ять)
-    size_t sent = 0;
-    uint8_t *buf = fb->buf;
-    size_t len = fb->len;
+    for (int i = 0; i < shotCount; i++) {
+      char head[160];
+      int n = snprintf(head, sizeof(head),
+                       "--%s\r\nContent-Disposition: form-data; name=\"image%d\"; "
+                       "filename=\"shot%d.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n",
+                       boundary.c_str(), i, i);
+      client.write((const uint8_t *)head, (size_t)n);
 
-    while (sent < len) {
-      size_t toSend = (len - sent > 1024) ? 1024 : (len - sent);
-      client.write(buf + sent, toSend);
-      sent += toSend;
+      // Передаємо дані прямо з буфера камери без malloc (економимо пам'ять)
+      size_t sent = 0;
+      uint8_t *buf = frames[i]->buf;
+      size_t len = frames[i]->len;
+      while (sent < len) {
+        size_t toSend = (len - sent > 1024) ? 1024 : (len - sent);
+        client.write(buf + sent, toSend);
+        sent += toSend;
+      }
+      client.print("\r\n");
+      Serial.printf("Uploaded frame %d/%d (%zu bytes)\n", i + 1, shotCount, len);
     }
 
+    client.printf("--%s--\r\n", boundary.c_str());
     Serial.println("Upload done, waiting for response...");
 
     String response = "";
@@ -482,7 +515,7 @@ bool do_capture_cycle() {
     client.stop();
   }
 
-  esp_camera_fb_return(fb);
+  release_frames();
 
   return true;
 }
