@@ -88,6 +88,10 @@ SYSTEM_INSTRUCTION = (
 # Маркери НЕВДАЧІ. Починаються з '!' і містять літери, тому фізично не можуть
 # збігтися з будь-якою допустимою відповіддю (цифри, пробіли, дефіси, крапка).
 ANSWER_OK = "ANSWER:"
+# Позначка «відповідь є, але підтвердження від іншої моделі немає».
+# Ставиться ПЕРЕД відповіддю, щоб її не сплутати зі звичайною:
+#   [ОДНА] 3      [ОДНА] 4 3 1 2
+SINGLE_ANSWER_PREFIX = "[ОДНА] "
 ANSWER_FAIL = "!"       # будь-яка відповідь, що починається з '!', = не розпізнано
 
 PROMPT = (
@@ -399,18 +403,23 @@ def call_gemini(image_bytes: bytes, mime: str = "image/jpeg"):
         return "!FAIL: моделі недоступні (" + ", ".join(dict.fromkeys(errors[:3])) + ")"
 
     detail = "; ".join(f"{v['text']}: {len(v['models'])}x" for v in votes.values())
+
+    # --- ЄДИНА відповідь: порівнювати нема з чим ---
+    # Якщо хоч одна модель дала цифрову відповідь, а жодна інша її не
+    # заперечила (інших цифрових відповідей немає) — подаємо її як відповідь.
+    # Але позначаємо, що вона ОДНА, щоб людина знала: підтвердження немає.
     if len(votes) == 1:
         slot = next(iter(votes.values()))
         answer, ms = slot["text"], slot["models"]
         if len(slot["variants"]) > 1:
             app.logger.info("same answer written differently: %s", slot["variants"])
+        _current_model["n"] = MODEL_CANDIDATES.index(ms[0])
         if len(ms) >= 2:
-            _current_model["n"] = MODEL_CANDIDATES.index(ms[0])
             app.logger.info("answer=%s agreed_by=%s", answer, ms)
             return answer
-        app.logger.warning("no quorum: only %s said %s (fails=%d errors=%d)",
-                           ms, answer, len(fails), len(errors))
-        return "!FAIL: немає підтвердження відповіді (" + detail + ")"
+        app.logger.warning("single answer (no confirmation): %s from %s (fails=%d errors=%d)",
+                           answer, ms, len(fails), len(errors))
+        return SINGLE_ANSWER_PREFIX + answer
 
     app.logger.warning("models disagree: %s", detail)
     return "!FAIL: моделі розходяться у відповіді (" + detail + ")"

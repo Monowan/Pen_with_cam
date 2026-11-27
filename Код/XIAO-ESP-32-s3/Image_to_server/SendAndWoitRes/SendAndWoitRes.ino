@@ -240,6 +240,13 @@ void handleServerResponse(String response) {
   int hdr_end = response.indexOf("\r\n\r\n");
   String body = (hdr_end >= 0) ? response.substring(hdr_end + 4) : response;
 
+  // Позначка "[ОДНА] " означає: відповідь є, але її не підтвердила інша модель.
+  // Для роботи з тілом її знімаємо, в лог виводимо станом.
+  if (body.startsWith("[ОДНА] ")) {
+    Serial.println("[AI] WARNING: single model answer, not confirmed");
+    body.remove(0, strlen("[ОДНА] "));
+  }
+
   if (parse_led_script(body) > 0) {
     server_pending_anim = true;
     Serial.printf("[LED] script parsed, %d steps, will run after upload cycle\n", animLen);
