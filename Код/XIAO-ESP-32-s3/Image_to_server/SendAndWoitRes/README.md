@@ -33,5 +33,5 @@ cd ~/Desktop/нмт/Код/XIAO-ESP-32-s3/Image_to_server/SendAndWoitRes
 - Додано `#include <WiFiClient.h>`.
 - Додано виклик `esp_sleep_enable_hold()` / коректна послідовність із `Serial.flush()`
   перед deep sleep, щоб не втрачати рядки логу.
-- Камера: `config.fb_count = 2` лише при UXGA; при `jpeg_quality = 5` кадр великий
+- Камера: FHD 1920×1080, `jpeg_quality = 30`, `fb_count = 2`; brightness 0, ae_level −2, обрана гамма (raw GMA off)
   (~300+ КБ), це очікувано.

@@ -27,7 +27,7 @@ Connection: close
 |---|---|
 | Метод | `POST` |
 | Шлях | `/upload` |
-| Тіло | JPEG (UXGA 1600×1200, quality 5) |
+| Тіло | JPEG (FHD 1920×1080, quality 30) |
 | Кодування відповіді | UTF-8, `text/plain` |
 | Таймаут TCP | 15 с |
 | Час очікування Wi-Fi | 15 с |

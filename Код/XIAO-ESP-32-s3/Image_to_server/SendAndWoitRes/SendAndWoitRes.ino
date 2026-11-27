@@ -158,10 +158,10 @@ void configCamera() {
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
 
-  // Використання OPI PSRAM для UXGA
+  // Використання OPI PSRAM для FHD
   if (psramFound()) {
-    config.frame_size = FRAMESIZE_UXGA; // 1600x1200
-    config.jpeg_quality = 5;            // Максимальна якість
+    config.frame_size = FRAMESIZE_FHD;  // 1920x1080
+    config.jpeg_quality = 30;           // 0..63, менше = краще (30 = помірний стиск)
     config.fb_count = 2;
     config.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
@@ -174,12 +174,13 @@ void configCamera() {
     return;
   }
 
-  // Тонке налаштування: вимикаємо RAW GMA
+  // Тонке налаштування сенсора
   sensor_t * s = esp_camera_sensor_get();
   if (s) {
-    s->set_raw_gma(s, 0); // Вимикаємо гаму
+    s->set_brightness(s, 0);   // яскравість 0 (-2..2, 0 = за замовчуванням)
+    s->set_ae_level(s, -2);    // компенсація експозиції -2 (-2..2)
+    s->set_raw_gma(s, 0);      // GMA (гама) вимкнена
     s->set_whitebal(s, 1);
-    s->set_ae_level(s, 0);
   }
   cameraStarted = true;
 }
@@ -416,7 +417,7 @@ bool do_capture_cycle() {
 
   // --- Upload ---
   WiFiClient client;
-  client.setTimeout(15000); // Збільшено для UXGA
+  client.setTimeout(15000); // Збільшено для FHD
 
   Serial.printf("Connecting to server %s:%d...\n", serverHost, serverPort);
   if (!client.connect(serverHost, serverPort)) {
