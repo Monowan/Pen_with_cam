@@ -4,3 +4,7 @@ __pycache__/
 /uploads/
 .easyclaw/
 api_key.txt
+
+# не комітити локальні середовища й тестові вивантаження
+.venv/
+uploads_test/
