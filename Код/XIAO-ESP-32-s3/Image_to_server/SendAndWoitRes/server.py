@@ -138,6 +138,7 @@ LED_LONG_MS       = 900    # довге світло для відмови
 # пам'ять: скільки разів поспіль сервер прислав той самий скрипт.
 # ESP відтворює, але дрібні 3-кратні повтори тільки заплутують:
 # ми показуємо кожен скрипт РІВНО ОДИН РАЗ за відповідь.
+MAX_LED_STEPS = 12          # ліміт кроків у прошивці ESP (LED_MAX_STEPS)
 MAX_COUNTED_ANSWERS = 5     # залишено для сумісності (не використовується основною логікою)
 
 
@@ -253,13 +254,195 @@ def _show_decimal(text: str, color="G") -> str:
 
 
 def _show_pairs(pairs, color="G") -> str:
-    """Пари «a-b»: a, пауза, b, довга пауза, наступна пара."""
+    """Пари «a-b»: a, 450, b, ПОТІМ довга пауза 1.6 с, далі наступна пара.
+
+    На відміну від рядa номерів, пауза між парами йде ВСЕРЕДИНІ кроку
+    попередньої пари, щоб вкластися в LED_MAX_STEPS = 12 навіть для
+    трьох пар (3 × 3 кроки = 9 + шапка + хвіст = 11).
+    """
     parts = []
     for i, (a, b) in enumerate(pairs):
         if i:
             parts.append(_gap_ms(LED_PAIR_GAP_MS))
         parts.append(_show_numbers([a, b], color))
     return ";".join(x for x in parts if x)
+
+
+def _digit_part(d: int, color="G") -> str:
+    """Одна цифра: N спалахів; 0 — мовчазна такта."""
+    if d <= 0:
+        return _gap_ms(LED_GROUP_GAP_MS * 2)
+    out = _digit_flashes(d)
+    return out if color == "G" else out.replace("LED:G:", "LED:%s:" % color)
+
+
+def _join(*parts) -> str:
+    """Склеює частини, зливаючи сусідні паузи (W:ON) в одну — сумарною довжиною.
+
+    Так «1, межа, 0, крапка, 2» = 400+450+900+1000 = 2750 мс однією дією
+    замість чотирьох окремих кроків, і скрипт вкладається в LED_MAX_STEPS = 12.
+    """
+    out = []
+    for p in parts:
+        p = (p or "").strip(";")
+        if not p:
+            continue
+        if not out:
+            out.append(p)
+            continue
+        prev_is_pause = out[-1].startswith("LED:W:ON:")
+        cur_is_pause = p.startswith("LED:W:ON:")
+        if prev_is_pause and cur_is_pause:
+            total = int(out[-1].split(":")[3]) + int(p.split(":")[3])
+            out[-1] = "LED:W:ON:%d" % min(total, 30000)
+        else:
+            out.append(p)
+    return ";".join(out)
+
+
+def _seq_parts(nums, color="G"):
+    """Ряд номерів: кожна цифра окремо, між сусідніми цифрами — межа 450 мс."""
+    parts = []
+    flat = [int(c) for v in nums for c in str(abs(int(v)))]
+    for i, d in enumerate(flat):
+        if i:
+            parts.append(_gap_ms(LED_GROUP_GAP_MS))
+        parts.append(_digit_part(d, color))
+    return parts
+
+
+def _number_parts(text: str, color="G"):
+    """Число: цифри підряд, межа 450, крапка 1000, нуль — мовчазна такта 900."""
+    parts = []
+    prev_gap = False
+    started = False
+    for ch in text:
+        if ch == ".":
+            if started:
+                parts.append(_gap_ms(LED_DECIMAL_GAP_MS))
+                prev_gap = True
+            continue
+        if not ch.isdigit():
+            continue
+        d = int(ch)
+        if d == 0:
+            # нуль = мовчазна такта; перед ним звичайна межа, щоб 0 не зливався
+            # із сусідньою цифрою (суцільна пауза лишається цілісною для ока)
+            if started and not prev_gap:
+                parts.append(_gap_ms(LED_GROUP_GAP_MS))
+            parts.append(_gap_ms(LED_GROUP_GAP_MS * 2))
+            prev_gap = True
+            started = True
+            continue
+        if started and not prev_gap:
+            parts.append(_gap_ms(LED_GROUP_GAP_MS))
+        parts.append(_digit_part(d, color))
+        prev_gap = False
+        started = True
+        prev_gap = False
+    return parts
+
+
+def _pair_parts(pairs, color="G"):
+    parts = []
+    for i, (a, b) in enumerate(pairs):
+        if i:
+            parts.append(_gap_ms(LED_PAIR_GAP_MS))
+        parts.extend(_seq_parts([a, b], color))
+    return parts
+
+
+def _is_number(tok) -> bool:
+    """Чи є токен числом (з десятковою крапкою або без неї)."""
+    try:
+        float(str(tok).replace(",", "."))
+        return True
+    except ValueError:
+        return False
+
+
+def _build_parts(kind, data, color):
+    """Кроки (з можливістю злиття пауз) для конкретного типу відповіді."""
+    if kind in ("seq", "set"):
+        toks = [str(x) for x in data]
+        # «2.5 3.5» — це кілька ЧИСЕЛ, а не номери варіантів; показуємо кожне
+        # як число (крапка = 1000 мс) і ставимо між ними межу 450 мс
+        if any(not str(t).isdigit() and _is_number(t) for t in toks):
+            parts = []
+            for i, t in enumerate(toks):
+                if i:
+                    parts.append(_gap_ms(LED_GROUP_GAP_MS))
+                parts.extend(_number_parts(t, color))
+            return parts
+        return _seq_parts([x for x in toks if x.isdigit()], color)
+    if kind == "pairs":
+        return _pair_parts([(int(a), int(b)) for a, b in data], color)
+    if kind == "num":
+        return _number_parts(str(data), color)
+    return []
+
+
+def _fit(*parts) -> str:
+    """Складає кроки і, якщо їх більше LED_MAX_STEPS, об'єднує паузи між собою.
+
+    Паузи (W:ON) самі по собі нічого не значать — важлива їх СУМА, тож
+    сусідні паузи складаються в одну довшу дію без зміни смислу. Пріоритет:
+    спершу паузи на краях, потім внутрішні. Спалахи не об'єднуються.
+    """
+    steps = []
+    for part in parts:                 # НЕ `p`: ім'я p зіпсувало б цикл нижче
+        for x in (part or "").strip(";").split(";"):
+            if x:
+                steps.append(x)
+    limit = MAX_LED_STEPS - 2          # шапка + хвіст додаються пізніше
+    while len(steps) > limit:
+        # зливаємо найкоротшу паузу з сусідньою паузою: сума пауз не змінює
+        # смислу, а коротка межа 450 втрачається найменш болісно
+        best = None                    # (key, i, j)
+        for i in range(len(steps)):
+            if not steps[i].startswith("LED:W:ON:"):
+                continue
+            cur = int(steps[i].split(":")[3])
+            # сусідня пауза — ліворуч або праворуч; між двома паузами
+            # стоїть спалах, пауза-пауза трапляється лише після склеювання
+            # ЛІВОРОЧ ЗАВЖДИ: пауза перед спалахом — це МЕЖА МІЖ ЦИФРАМИ,
+            # тож прибирати її зі спалахом безпечно; праворуч спалах може
+            # закривати цифру (пауза, спалах, пауза = «число перед крапкою»)
+            for cand in (i - 1,):
+                if not (0 <= cand < len(steps)):
+                    continue
+                if not steps[cand].startswith("LED:W:ON:"):
+                    continue
+                key = (cur, i)
+                if best is None or key < best[0]:
+                    best = (key, i, cand)
+                break
+        if best is None:
+            # сусідніх пауз немає: короткий спалах, що стоїть між двома
+            # паузами, МОЖНА прибрати — інакше три паузи поспіль не
+            # склеюються і скрипт ніколи не влізе в ліміт
+            for i in range(1, len(steps) - 1):
+                if steps[i].startswith("LED:W:ON:"):
+                    continue
+                if not (steps[i - 1].startswith("LED:W:ON:")
+                        and steps[i + 1].startswith("LED:W:ON:")):
+                    continue
+                key = (int(steps[i - 1].split(":")[3]), i)
+                if best is None or key < best[0]:
+                    best = (key, i, -1)
+        if best is None:
+            break                      # лишились самі спалахи — далі не вийде
+        _, i, j = best
+        if j < 0:                      # варіант «викинути спалах між паузами»
+            a = int(steps[i - 1].split(":")[3])
+            b = int(steps[i + 1].split(":")[3])
+            steps[i - 1:i + 2] = ["LED:W:ON:%d" % min(a + b, 30000)]
+            continue
+        a = int(steps[i].split(":")[3])
+        b = int(steps[j].split(":")[3])
+        lo = min(i, j)
+        steps[lo:lo + 2] = ["LED:W:ON:%d" % min(a + b, 30000)]
+    return ";".join(steps)
 
 
 def led_script_for(answer: str, confirmed: bool = True) -> str:
@@ -275,28 +458,15 @@ def led_script_for(answer: str, confirmed: bool = True) -> str:
             return "LED:R:SP:%d:%d:3" % (LED_DIGIT_MS, LED_DIGIT_GAP)
         return "LED:R:ON:%d" % LED_LONG_MS     # інша відмова — довге червоне
 
-    color = "G" if confirmed else "C"          # C = cyan (<= зменшена впевненість)
+    color = "G" if confirmed else "C"
 
     key = answer_key(answer)
     kind, data = key[0], key[1]
 
-    body = ""
-    if kind == "num" and not any(d in "123456789" for d in str(data)):
-        # відповідь — самий нуль (0, 0.0, .0): показати нічим, тож це сигнал
-        # «нуль» окремо: три короткі зелені, щоб не плутати з відмовою
-        return "%s;%s;%s" % (_head(), _digit_flashes(0) or _gap_ms(LED_GROUP_GAP_MS * 2), _tail())
-    if kind in ("seq", "set"):
-        body = _show_numbers([int(x) for x in data if str(x).isdigit()], color)
-    elif kind == "pairs":
-        body = _show_pairs([(int(a), int(b)) for a, b in data], color)
-    elif kind == "num":
-        body = _show_decimal(str(data), color)
-    else:
-        return ""
-
+    body = _fit(*_build_parts(kind, data, color))
     if not body:
         return ""
-    return "%s;%s;%s" % (_head(), body, _tail())
+    return _join(_head(), body, _tail())
 
 
 ANSWER_FAIL = "!"       # будь-яка відповідь, що починається з '!', = не розпізнано
