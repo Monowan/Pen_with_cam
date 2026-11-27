@@ -111,6 +111,15 @@ void feed_wdt() {
 // Індикує саме відмову сервера (!FAIL: ...), не помилку мережі.
 const unsigned long FAIL_BLINK_MS = 1000UL;
 
+// --- Сигнал "кадр зроблено": зовсім короткий блік червоного ---
+const unsigned long SHOT_BLINK_MS = 40UL;    // 40 мс = майже мить
+
+static void blink_shot() {
+  set_brightness(45, 0, 0);
+  delay(SHOT_BLINK_MS);
+  set_brightness(0, 0, 0);
+}
+
 static void blink_red_once(unsigned long ms) {
   set_brightness(45, 0, 0);          // яскравість червоного як в Led_test
   unsigned long t0 = millis();
@@ -162,7 +171,7 @@ void configCamera() {
   if (psramFound()) {
     config.frame_size = FRAMESIZE_FHD;  // 1920x1080
     config.jpeg_quality = 30;           // 0..63, менше = краще (30 = помірний стиск)
-    config.fb_count = 2;
+    config.fb_count = 3;                // 3 кадри в черзі: 2 із завданням + запас
     config.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
     Serial.println("PSRAM not found! Check IDE settings.");
@@ -389,6 +398,12 @@ bool wifi_ensure() {
   return true;
 }
 
+// Скільки кадрів робити за одне натискання і яка пауза між ними.
+// Мінімальна затримка: камера з fb_count=3 тримає кадри напоготові,
+// тому наступний esp_camera_fb_get() віддає вже готовий кадр без очікування.
+const int           SHOT_COUNT = 2;
+const unsigned long SHOT_GAP_MS = 30UL;      // мс між кадрами
+
 // Один повний цикл: (Wi-Fi вже є) -> фото -> upload.
 // Wi-Fi НЕ вимикається: з'єднання живе до глибокого сну.
 // Повертає true, якщо досягли кінця (успішно чи ні — не важливо).
@@ -406,14 +421,27 @@ bool do_capture_cycle() {
     delay(1000); // Час для автоекспозиції
   }
 
-  // --- Capture ---
+  // --- Capture (кілька кадрів підряд) ---
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("Camera capture failed");
     return false;
   }
+  Serial.printf("Picture 1/%d taken! Size: %zu bytes\n", SHOT_COUNT, fb->len);
+  blink_shot();   // коротюсінький блік: кадр реально зроблено
 
-  Serial.printf("Picture taken! Size: %zu bytes\n", fb->len);
+  for (int i = 1; i < SHOT_COUNT; i++) {
+    delay(SHOT_GAP_MS);
+    camera_fb_t *next = esp_camera_fb_get();
+    if (!next) {
+      Serial.printf("Picture %d/%d failed, using previous\n", i + 1, SHOT_COUNT);
+      break;
+    }
+    esp_camera_fb_return(fb);   // попередній більше не потрібен
+    fb = next;
+    Serial.printf("Picture %d/%d taken! Size: %zu bytes\n", i + 1, SHOT_COUNT, fb->len);
+    blink_shot();
+  }
 
   // --- Upload ---
   WiFiClient client;
