@@ -662,10 +662,12 @@ def answer_key(text: str):
     one = t.replace(",", ".").strip()
     if one and " " not in one and not one.startswith("-"):
         try:
-            float(one)
-            return ("num", one)
+            f = float(one)
         except ValueError:
             pass
+        else:
+            # "3.0" і "3" — те саме число; ключ не повинен відрізнятися
+            return ("num", ("%d" % f) if f == int(f) else repr(f))
 
     raw_tokens = [x for x in t.replace("-", " ").replace(",", " ").split() if x]
 
@@ -688,7 +690,17 @@ def answer_key(text: str):
     tokens = raw_tokens
     if not tokens:
         return ("empty",)
-    return ("set", tuple(sorted(tokens, key=lambda x: (len(x), x))))
+    # Числа серед токенів нормалізуємо: "25,5" вже став "25.5", а "3.0" і "3"
+    # — те саме число, тож моделі не повинні «розходитися» через запис.
+    norm = []
+    for x in tokens:
+        try:
+            f = float(x.replace(",", "."))
+        except ValueError:
+            norm.append(x)
+            continue
+        norm.append(("%d" % f) if f == int(f) else repr(f))
+    return ("set", tuple(sorted(norm, key=lambda x: (len(x), x))))
 
 
 def canonical_answer(text: str) -> str:
@@ -757,13 +769,15 @@ def with_led(answer: str, confirmed: bool = True) -> str:
 
 
 def call_gemini(image_bytes: bytes, mime: str = "image/jpeg"):
-    """Пробує моделі по колу і повертає відповідь ЛИШЕ за згодою (кворумом).
+    """Пробує моделі по колу і повертає відповідь за БІЛЬШІСТЮ голосів.
 
-    Правило безпеки: цифри повертаємо тільки якщо щонайменше ДВІ різні моделі
-    незалежно дійшли тієї самої відповіді. Якщо моделі розходяться
-    (2 проти 3 — на реальних фото це трапляється) або відповіла лише одна,
-    повертаємо '!FAIL: ...'. Ніколи не віддаємо першу відповідь, що прийшла,
-    і ніколи не вибираємо 'більшість голосів' як заспокоєння.
+    Правило: перемагає відповідь, за яку проголосувала більшість моделей,
+    що дали цифрову відповідь. Не обов'язково, щоб згодилися ВСІ: якщо
+    три моделі кажуть «3», а одна — «2», відповідь «3».
+
+    Нічия (2 проти 2, 1 проти 1) — '!FAIL: моделі розходяться', бо вибору
+    без здогадки немає. Друга умова перемоги: лідер має хоча б 2 голоси —
+    одна єдина відповідь без жодної підтримки не може вважатися більшістю.
     """
     order = MODEL_CANDIDATES[_current_model["n"]:] + MODEL_CANDIDATES[:_current_model["n"]]
     votes = {}    # канонічний ключ -> {"text": людський вигляд, "models": [...]}
@@ -802,19 +816,30 @@ def call_gemini(image_bytes: bytes, mime: str = "image/jpeg"):
 
     detail = "; ".join(f"{v['text']}: {len(v['models'])}x" for v in votes.values())
 
-    # --- ЄДИНА відповідь: порівнювати нема з чим ---
-    # Якщо хоч одна модель дала цифрову відповідь, а жодна інша її не
-    # заперечила (інших цифрових відповідей немає) — подаємо її як відповідь.
-    # Але позначаємо, що вона ОДНА, щоб людина знала: підтвердження немає.
+    # --- БІЛЬШІСТЬ голосів ---
+    # Сортуємо за кількістю голосів: перше місце — лідер.
+    ranked = sorted(votes.items(), key=lambda kv: len(kv[1]["models"]), reverse=True)
+    top_key, top = ranked[0]
+    runner = ranked[1][1] if len(ranked) > 1 else None
+    answer, ms = top["text"], top["models"]
+    if len(top["variants"]) > 1:
+        app.logger.info("same answer written differently: %s", top["variants"])
+    _current_model["n"] = MODEL_CANDIDATES.index(ms[0])
+
+    # Нічия з другою відповіддю — вибору без здогадки немає.
+    if runner is not None and len(runner["models"]) == len(ms):
+        app.logger.warning("models disagree (tie): %s", detail)
+        return with_led("!FAIL: моделі розходяться у відповіді (" + detail + ")", confirmed=False)
+
+    # Більшість є: лідер отримав щонайменше 2 голоси.
+    if len(ms) >= 2:
+        dissent = "; ".join("%s: %dx" % (v["text"], len(v["models"])) for _, v in ranked[1:])
+        app.logger.info("answer=%s agreed_by=%s dissent=%s (fails=%d errors=%d)",
+                        answer, ms, dissent or "none", len(fails), len(errors))
+        return with_led(answer, confirmed=True)
+
+    # Лідер має лише 1 голос: більшості немає — блакитним, якщо відповідь одна.
     if len(votes) == 1:
-        slot = next(iter(votes.values()))
-        answer, ms = slot["text"], slot["models"]
-        if len(slot["variants"]) > 1:
-            app.logger.info("same answer written differently: %s", slot["variants"])
-        _current_model["n"] = MODEL_CANDIDATES.index(ms[0])
-        if len(ms) >= 2:
-            app.logger.info("answer=%s agreed_by=%s", answer, ms)
-            return with_led(answer, confirmed=True)
         app.logger.warning("single answer (no confirmation): %s from %s (fails=%d errors=%d)",
                            answer, ms, len(fails), len(errors))
         return with_led(SINGLE_ANSWER_PREFIX + answer, confirmed=False)
