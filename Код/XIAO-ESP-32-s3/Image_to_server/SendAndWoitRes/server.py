@@ -70,7 +70,6 @@ API_KEY, KEY_SOURCE = load_api_key()
 # gemini-3.8-flash / 3.7-flash — 503 high demand або таймаут, тримаємо в кінці.
 MODEL_CANDIDATES = [
     "gemini-3.5-flash-lite",     # 200, стабільна
-    "gemini-3.1-flash-lite",     # 200, стабільна
     "gemini-flash-lite-latest",  # 200, стабільна
     "gemini-3-flash-preview",    # 200 (v1beta)
 ]
