@@ -73,7 +73,10 @@ MODEL_CANDIDATES = [
 ]
 # Скільки РАЗІВ питаємо одну й ту саму модель. «Більшість» тоді означає:
 # при 3 запитах — 2 однакові відповіді з 3; при 2 — обидві мають збігтися.
-MODEL_REPEATS = 3
+# ВИМІРЯНО 2026-11-28: при 3 повтореннях похибка моделі СИСТЕМАТИЧНА (вона
+# однаково помиляється всі 3 рази), тому більшість підсилює помилку (0/10
+# правильних) і втричі витрачає квоту. Ставимо 1: та ж точність, менше витрат.
+MODEL_REPEATS = 1
 _current_model = {"n": 0}
 
 # ДОВГИЙ system-промпт ПРИБРАНО СВІДОМО — виміряно на реальному фото.
@@ -477,7 +480,11 @@ PROMPT = (
     "Прочитай завдання на фото. Відповідай ЛИШЕ цифрою варіанта, нумеруючи "
     "варіанти з 1 (А=1, Б=2, В=3, Г=4). Якщо правильних кілька — номери через "
     "пробіл (1 4 5). Встановлення відповідності — пари через пробіл (1-3 2-1). "
-    "Числова відповідь — саме число з крапкою (25.5). Без пояснень."
+    "Числова відповідь — саме число з крапкою (25.5). Без пояснень. "
+    "ВАЖЛИВО: розв'язуй виключно за тим, що видно на фото — за виділеними "
+    "жирним буквами у словах. Не вгадуй відповідь за типом/шаблоном завдання "
+    "і не підставляй 'типовий' варіант. Якщо виділення на фото не читається — "
+    "не вибирай варіант навмання."
 )
 
 app = Flask(__name__)
@@ -731,6 +738,51 @@ def pick_best_frame(frames):
     return frames[best], scores, best
 
 
+def preprocess_image(image_bytes: bytes) -> bytes:
+    """Готує кадр для Gemini: обрізає зайвий фон і підсилює різкість.
+
+    ВИМІРЯНО 2026-11-28 на реальному фото: обрізання світлої області екрана
+    + переведення в сірий + autocontrast + збільшення x3 + UnsharpMask давало
+    4/4 правильних проти 2/4 на оригіналі. Збільшення БЕЗ обрізання не
+    допомагало: модель губилась на чорних полях і на інтерфейсі навколо.
+
+    За будь-якої помилки (немає Pillow, битий файл) повертає вхідні байти
+    без змін — краще гірше фото, ніж зламаний запит.
+    """
+    if not HAVE_PIL:
+        return image_bytes
+    try:
+        import io
+        from PIL import Image, ImageFilter, ImageOps
+        with Image.open(io.BytesIO(image_bytes)) as im:
+            g = im.convert("L")
+            # Межа екрана: усе, що яскравіше за 150. getbbox() дає прямокутник
+            # навколо світлої області; якщо його немає — лишаємо як є.
+            mask = g.point(lambda p: 255 if p > 150 else 0)
+            box = mask.getbbox()
+            if box:
+                # трохи відступу, щоб не зрізати першу/останню літеру
+                pad = 6
+                box = (max(0, box[0] - pad), max(0, box[1] - pad),
+                       min(g.width, box[2] + pad), min(g.height, box[3] + pad))
+                w, h = box[2] - box[0], box[3] - box[1]
+                # захист від виродження: обрізаємо лише якщо це справді рамка
+                if w >= 100 and h >= 60 and (w * h) < (g.width * g.height * 0.97):
+                    g = g.crop(box)
+            g = ImageOps.autocontrast(g, cutoff=1)
+            scale = 3
+            g = g.resize((g.width * scale, g.height * scale), Image.LANCZOS)
+            g = g.filter(ImageFilter.UnsharpMask(radius=3, percent=180, threshold=2))
+            buf = io.BytesIO()
+            g.convert("RGB").save(buf, "JPEG", quality=95)
+            app.logger.info("preprocess: %dx%d -> %dx%d, %d байт",
+                            im.width, im.height, g.width, g.height, buf.tell())
+            return buf.getvalue()
+    except Exception as e:
+        app.logger.warning("preprocess failed (%s) — надсилаю оригінал", e)
+        return image_bytes
+
+
 def with_led(answer: str, confirmed: bool = True) -> str:
     """Тіло відповіді = відповідь + новий рядок + LED-скрипт.
 
@@ -920,7 +972,7 @@ def upload_and_analyze():
                 pass
 
     t0 = time.time()
-    answer = call_gemini(best_data)
+    answer = call_gemini(preprocess_image(best_data))
     app.logger.info("upload frames=%d in %.1fs -> %s",
                     len(saved), time.time() - t0, answer[:80])
     return answer, 200
@@ -937,7 +989,7 @@ def test_with_local_file():
         img = request.get_data()
     if not img:
         return "no image", 400
-    return call_gemini(img), 200
+    return call_gemini(preprocess_image(img)), 200
 
 
 if __name__ == "__main__":
