@@ -69,10 +69,11 @@ API_KEY, KEY_SOURCE = load_api_key()
 # gemini-2.5-flash / 2.0-flash / 2.5-pro — 404 "no longer available to new users".
 # gemini-3.8-flash / 3.7-flash — 503 high demand або таймаут, тримаємо в кінці.
 MODEL_CANDIDATES = [
-    "gemini-3.5-flash-lite",     # 200, стабільна
-    "gemini-flash-lite-latest",  # 200, стабільна
-    "gemini-3-flash-preview",    # 200 (v1beta)
+    "gemini-3.5-flash-lite",     # 200, стабільна — єдина робоча
 ]
+# Скільки РАЗІВ питаємо одну й ту саму модель. «Більшість» тоді означає:
+# при 3 запитах — 2 однакові відповіді з 3; при 2 — обидві мають збігтися.
+MODEL_REPEATS = 3
 _current_model = {"n": 0}
 
 SYSTEM_INSTRUCTION = (
@@ -770,31 +771,35 @@ def with_led(answer: str, confirmed: bool = True) -> str:
 def call_gemini(image_bytes: bytes, mime: str = "image/jpeg"):
     """Пробує моделі по колу і повертає відповідь за БІЛЬШІСТЮ голосів.
 
-    Правило: перемагає відповідь, за яку проголосувала більшість моделей,
-    що дали цифрову відповідь. Не обов'язково, щоб згодилися ВСІ: якщо
-    три моделі кажуть «3», а одна — «2», відповідь «3».
+    Кожна модель із MODEL_CANDIDATES питається MODEL_REPEATS разів (незалежні
+    запити на те саме фото). Перемагає відповідь, за яку проголосувала
+    більшість — згоди ВСІХ не потрібно: «3, 3, 2» -> «3».
 
-    Нічия (2 проти 2, 1 проти 1) — '!FAIL: моделі розходяться', бо вибору
-    без здогадки немає. Друга умова перемоги: лідер має хоча б 2 голоси —
-    одна єдина відповідь без жодної підтримки не може вважатися більшістю.
+    Нічия (1 проти 1) — '!FAIL: моделі розходяться', бо вибору без здогадки
+    немає. Друга умова перемоги: лідер має щонайменше 2 голоси — одна єдина
+    відповідь без жодної підтримки не може вважатися більшістю.
     """
     order = MODEL_CANDIDATES[_current_model["n"]:] + MODEL_CANDIDATES[:_current_model["n"]]
+    # Голоси рахуються за ОДНОКОЮ відповіддю, а не за моделлю: ту саму модель
+    # питаємо MODEL_REPEATS разів, тож у "models" лежить те саме ім'я кілька
+    # разів, і `MODEL_CANDIDATES.index(...)` нижче працює як треба.
     votes = {}    # канонічний ключ -> {"text": людський вигляд, "models": [...]}
     fails = []    # '!FAIL: причина'
     errors = []   # 429 / 404 / таймаут
-    for model in order:
+    asks = [(m, i + 1) for m in order for i in range(MODEL_REPEATS)]
+    for model, attempt in asks:
         code, data = call_gemini_once(model, image_bytes, mime)
         if code != 200:
             msg = str(data)[:200]
             errors.append("429 (квота)" if "429" in msg else f"{model}: {code}")
-            app.logger.warning("model=%s failed: %s", model, msg)
+            app.logger.warning("model=%s #%d failed: %s", model, attempt, msg)
             continue
         try:
             out = data["candidates"][0]["content"]["parts"][0]["text"].strip()
         except Exception:
             out = ""
         out = normalize_answer(out)
-        app.logger.warning("model=%s 200 -> %s", model, out)
+        app.logger.warning("model=%s #%d 200 -> %s", model, attempt, out)
         if out.startswith("!FAIL"):
             fails.append(out)
         elif out == "0":
