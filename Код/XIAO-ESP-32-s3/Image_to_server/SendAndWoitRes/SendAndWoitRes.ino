@@ -107,6 +107,21 @@ void feed_wdt() {
 }
 
 // ===========================================================================
+// --- Сигнал "не розпізнано": один блік червоного на 1 секунду ---
+// Індикує саме відмову сервера (!FAIL: ...), не помилку мережі.
+const unsigned long FAIL_BLINK_MS = 1000UL;
+
+static void blink_red_once(unsigned long ms) {
+  set_brightness(45, 0, 0);          // яскравість червоного як в Led_test
+  unsigned long t0 = millis();
+  while (millis() - t0 < ms) {
+    feed_wdt();
+    delay(10);
+  }
+  set_brightness(0, 0, 0);
+}
+
+// ===========================================================================
 // --- Таймер бездіяльності ---
 const unsigned long IDLE_SLEEP_MS = 60000UL;   // 1 хв без натискань -> deep sleep
 const unsigned long DEBOUNCE_MS   = 50;        // антибрязкіт кнопки
@@ -201,6 +216,7 @@ void configCamera() {
 #define LED_DEFAULT_BRIGHT 100    // яскравість для BL/SP (у Led_test 45/100/20)
 
 bool server_pending_anim = false;     // знайдено валідний LED-рядок -> треба відтворити
+bool server_pending_fail = false;     // сервер відмовився (!FAIL) -> 1 с червоного
 
 LedStep anim[LED_MAX_STEPS];
 int     animLen = 0;
@@ -218,8 +234,9 @@ void handleServerResponse(String response) {
     Serial.printf("[LED] script parsed, %d steps, will run after upload cycle\n", animLen);
   } else if (body.startsWith("!FAIL")) {
     // Сервер не зміг упевнено розпізнати завдання — це НЕ відповідь.
-    // LED не чіпаємо, щоб не сплутати відмову з результатом.
-    Serial.println("[AI] no confident answer (refusal), LED untouched");
+    // Сигналізуємо одним секундним бліком червоного, LED-скрипт не запускаємо.
+    server_pending_fail = true;
+    Serial.println("[AI] no confident answer (refusal) -> red blink");
   } else {
     Serial.println("[LED] no LED script in response (answer only)");
   }
@@ -497,6 +514,13 @@ void loop() {
       do_capture_cycle();
       Serial.printf("[NET] WiFi still %s\n",
                     WiFi.status() == WL_CONNECTED ? "connected" : "disconnected");
+
+      // Якщо сервер відмовився (!FAIL) — один блік червоного на 1 с
+      if (server_pending_fail) {
+        server_pending_fail = false;
+        blink_red_once(FAIL_BLINK_MS);
+        Serial.println("[LED] fail blink finished");
+      }
 
       // Якщо сервер прислав алгоритм блимання — відтворюємо його
       if (server_pending_anim) {
