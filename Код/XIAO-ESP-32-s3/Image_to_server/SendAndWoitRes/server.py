@@ -94,51 +94,176 @@ ANSWER_OK = "ANSWER:"
 SINGLE_ANSWER_PREFIX = "[ОДНА] "
 
 # ===========================================================================
-# СИСТЕМА ІНДИКАЦІЇ СВІТЛОДІОДОМ
+# СИСТЕМА ІНДИКАЦІЇ СВІТЛОДІОДОМ — показує САМУ ВІДПОВІДЬ
 # ---------------------------------------------------------------------------
-# Принцип: читається на дотик і боковим зором, без таблиць.
-#   • КОЛІР  = впевненість     зелене = добре, жовте = сумнівно, червоне = невдача
-#   • РИТМ   = зміст          рівні однакові спалахи = кількість, довге = «одне»
+# Задача: показати, ЯКІ номери правильні, а не скільки їх.
 #
-#   N зелених спалахів     — N правильних номерів (1..5)   ← основне
-#   один довгий зелений    — відповідь не про номери (число, пари)
-#   два ко роткі зелені     — відповідь є, але НЕ підтверджена другою моделлю
-#   жовте рівне світло 0.4с — понад 5 відповідей (точну кількість не показуємо)
-#   один довгий червоний   — не розпізнано (відмова)
-#   три короткі червоні     — моделі розійшлися в думках
+# БАЗОВЕ ПРАВИЛО (все інше з нього випливає):
+#   число N показується N довгими зеленими спалахами.
+#     1 = ●            2 = ●●          3 = ●●●
+#     4 = ●●●●         5 = ●●●●●       6 = ●●●●●●  ...
+#   Нуль не має довгого спалаху — він показується паузою певної довжини.
 #
-# Ритм відрізняється і в темряві: спалахи рівні, пауза між ними ~= спалаху.
+# РОЗДІЛЮВАЧІ (що йде між двома числами):
+#   коротка пауза  ~450 мс   — межа між номерами          «1 4 5»
+#   середня пауза  ~1000 мс  — десяткова крапка           «25.5»
+#   довга пауза   ~1600 мс   — початок нової пари         «1-3 2-1»
+#   подвійна пауза перед/після серії — «зараз нова відповідь»
+#
+# ЧОМУ ТАК:
+#   • довгі спалахи (260 мс) видно боковим зором, їх не треба ловити
+#     клацанням на повороті ручки, як 90-мілісекундні;
+#   • пауза в 3-4 рази довша за спалах — при мед. зорі це яскрава межа;
+#   • різні паузи масштабуються 1:2:3.6 — важко сплутати логічно;
+#   • жодних Морзе чи таблиць: тільки «велика точка = цифра».
+#
+# КОЛІР = ВПЕВНЕНІСТЬ, а не зміст:
+#   зелений — відповідь підтверджена двома моделями
+#   блакитний — відповідала лише одна модель (показуємо, але зізнаємось)
+#   червоний — відповіді немає (відмова)
+#
+# ПЕРЕД КОЖНОЮ ВІДПОВІДДЮ — «шапка»: 2 короткі сині спалахи = «слухай».
+# ПОСЛЕ — 1 короткий синій = «кінець».
 # ===========================================================================
-LED_SPARK_MS = 90          # тривалість одного спалаху
-LED_SPARK_GAP = 110        # пауза між спалахами
-LED_LONG_MS = 700          # «довге» світло
-LED_PAUSE_BETWEEN = 400    # пауза перед повтором «коротких» сигналів
+LED_DIGIT_MS      = 260    # довгий спалах = 1 цифра
+LED_DIGIT_GAP     = 180    # пауза між спалахами ОДНОГО числа
+LED_GROUP_GAP_MS  = 450    # між номерами «1  4  5»
+LED_DECIMAL_GAP_MS = 1000  # десяткова крапка «25.5»
+LED_PAIR_GAP_MS   = 1600   # початок нової пари «1-3  2-1»
+LED_HEAD_BLINK_MS = 120    # шапка/кінець
+LED_HEAD_GAP_MS   = 160
+LED_SESSION_MS    = 450    # пауза після шапки
+LED_LONG_MS       = 900    # довге світло для відмови
 
-# Межа, після якої рахувати спалахи стає нечитабельно
-MAX_COUNTED_ANSWERS = 5
+# пам'ять: скільки разів поспіль сервер прислав той самий скрипт.
+# ESP відтворює, але дрібні 3-кратні повтори тільки заплутують:
+# ми показуємо кожен скрипт РІВНО ОДИН РАЗ за відповідь.
+MAX_COUNTED_ANSWERS = 5     # залишено для сумісності (не використовується основною логікою)
 
 
-def _sparks(color: str, n: int) -> str:
-    """n рівних спалахів заданого кольору."""
-    return "LED:%s:SP:%d:%d:%d" % (color, LED_SPARK_MS, LED_SPARK_GAP, n)
+def _digit_flashes(n: int) -> str:
+    """Одне число N = N довгих спалахів зеленим, у межах N=0..9.
 
-
-def _answer_numbers(answer: str) -> list:
-    """Витягує номери варіантів із відповіді, якщо це «номери».
-
-    Повертає список номерів для звичайної відповіді-набору/послідовності,
-    і порожній список, якщо відповідь не про номери варіантів
-    (числове значення або пари відповідності).
+    0 не має спалахів — тому воно не «порожнє», а «пауза певної довжини»:
+    довша, ніж звичайна межа між цифрами. Див. led_script_for для випадку «0».
     """
-    key = answer_key(answer)
-    if key[0] in ("seq", "set"):
-        nums = [t for t in key[1] if t.isdigit()]
-        return nums if len(nums) == len(key[1]) else []
-    return []
+    if n <= 0:
+        return ""                       # 0 = пауза (порожній такт)
+    return "LED:G:SP:%d:%d:%d" % (LED_DIGIT_MS, LED_DIGIT_GAP, n)
+
+
+def _gap_ms(ms: int) -> str:
+    """Мовчазна пауза заданої довжини (білий на мінімальній тривалості)."""
+    return "LED:W:ON:%d" % max(ms, 1)
+
+
+def _head() -> str:
+    """«Шапка» — 2 короткі сині: «зараз буде відповідь»."""
+    return "LED:B:SP:%d:%d:2" % (LED_HEAD_BLINK_MS, LED_HEAD_GAP_MS)
+
+
+def _tail() -> str:
+    """«Кінець» — 1 короткий синій: «відповідь завершена»."""
+    return "LED:B:ON:%d" % LED_HEAD_BLINK_MS
+
+
+def _number_flashes(v: int) -> str:
+    """Спалахи для числа будь-якої величини.
+
+    7     -> 7 спалахів
+    12    -> 1 пауза 12 спалахів? НІ. Кожна цифра окремо: 1, пауза, 2
+    Так випливає з правила «N спалахів = цифра N»: для багатозначного
+    числа показуємо цифри підряд із короткою паузою між ними.
+    """
+    digits = [int(c) for c in str(abs(int(v)))]
+    parts = []
+    for i, d in enumerate(digits):
+        if i:
+            parts.append(_gap_ms(LED_GROUP_GAP_MS))
+        f = _digit_flashes(d)
+        if f:
+            parts.append(f)
+    return ";".join(parts)
+
+
+def _show_numbers(nums, color="G") -> str:
+    """Ряд номерів: N1, пауза, N2, пауза, ...
+    Кожен номер може бути багатозначним -> показуємо його цифри підряд.
+    """
+    if not nums:
+        return ""
+    parts = []
+    for i, v in enumerate(nums):
+        if i:
+            parts.append(_gap_ms(LED_GROUP_GAP_MS))
+        piece = _number_flashes(int(v))
+        if piece:
+            parts.append(piece.replace("LED:G:", "LED:%s:" % color, 1)
+                         if piece.startswith("LED:G:") else piece)
+    # перефарбувати всі однокрапкові "LED:G:" на потрібний колір
+    out = ";".join(parts)
+    if color != "G":
+        out = out.replace("LED:G:", "LED:%s:" % color)
+    return out
+
+
+def _split_digits(text: str, color="G") -> str:
+    """Послідовність цифр числа: кожна цифра = свої спалахи, між ними пауза.
+
+    Розділювачі всередині одного числа:
+      450            -> межа між сусідніми цифрами
+      1000           -> десяткова крапка
+      900 (2×450)    -> цифра 0 (0 не має власних спалахів, тому це мовчазна такта)
+    Так 10.25 = 1 [пауза] 0 [крапка] 2 [пауза] 5
+    """
+    parts = []
+    prev_gap = False                 # чи вже стоїть розділювач перед поточною цифрою
+    started = False                  # чи вже був хоч один спалах
+    for ch in text:
+        if ch == ".":
+            if started:
+                parts.append(_gap_ms(LED_DECIMAL_GAP_MS))
+            prev_gap = True
+            continue
+        if not ch.isdigit():
+            continue
+        d = int(ch)
+        if d == 0:
+            # нуль = мовчазна такта, довша за звичайну межу
+            if started and not prev_gap:
+                parts.append(_gap_ms(LED_GROUP_GAP_MS))
+            if started:
+                parts.append(_gap_ms(LED_GROUP_GAP_MS * 2))
+            prev_gap = True
+            continue
+        if started and not prev_gap:
+            parts.append(_gap_ms(LED_GROUP_GAP_MS))
+        parts.append(_digit_flashes(d))
+        started = True
+        prev_gap = False
+    out = ";".join(parts)
+    if color != "G":
+        out = out.replace("LED:G:", "LED:%s:" % color)
+    return out
+
+
+def _show_decimal(text: str, color="G") -> str:
+    """Число з крапкою — див. _split_digits."""
+    return _split_digits(text, color)
+
+
+def _show_pairs(pairs, color="G") -> str:
+    """Пари «a-b»: a, пауза, b, довга пауза, наступна пара."""
+    parts = []
+    for i, (a, b) in enumerate(pairs):
+        if i:
+            parts.append(_gap_ms(LED_PAIR_GAP_MS))
+        parts.append(_show_numbers([a, b], color))
+    return ";".join(x for x in parts if x)
 
 
 def led_script_for(answer: str, confirmed: bool = True) -> str:
-    """Перетворює відповідь у LED-скрипт за системою індикації.
+    """Перетворює відповідь у LED-скрипт, що ПОКАЗУЄ САМУ ВІДПОВІДЬ.
 
     answer    — цифрова відповідь або '!FAIL: ...'
     confirmed — чи підтвердила відповідь друга модель
@@ -147,24 +272,33 @@ def led_script_for(answer: str, confirmed: bool = True) -> str:
     """
     if answer.startswith("!FAIL"):
         if "розходяться" in answer:
-            return _sparks("R", 3)          # моделі розійшлися — три короткі червоні
-        return "LED:R:ON:%d" % LED_LONG_MS   # інша відмова — довге червоне
+            return "LED:R:SP:%d:%d:3" % (LED_DIGIT_MS, LED_DIGIT_GAP)
+        return "LED:R:ON:%d" % LED_LONG_MS     # інша відмова — довге червоне
 
-    nums = _answer_numbers(answer)
-    if not nums:
-        # число або пари: довге зелене — «відповідь не про номери»
-        return "LED:G:ON:%d" % LED_LONG_MS
+    color = "G" if confirmed else "C"          # C = cyan (<= зменшена впевненість)
 
-    if not confirmed:
-        # єдину відповідь підтвердити нема кому: рівні короткі зелені,
-        # потім пауза і ряд повільних жовтих спалахів — «сумнівно»
-        return "%s;LED:Y:SP:%d:%d:%d" % (
-            _sparks("G", 2), 220, 180, min(len(nums), 3))
+    key = answer_key(answer)
+    kind, data = key[0], key[1]
 
-    if len(nums) > MAX_COUNTED_ANSWERS:
-        return "LED:Y:ON:400"               # забагато — рівне жовте попередження
+    body = ""
+    if kind == "num" and not any(d in "123456789" for d in str(data)):
+        # відповідь — самий нуль (0, 0.0, .0): показати нічим, тож це сигнал
+        # «нуль» окремо: три короткі зелені, щоб не плутати з відмовою
+        return "%s;%s;%s" % (_head(), _digit_flashes(0) or _gap_ms(LED_GROUP_GAP_MS * 2), _tail())
+    if kind in ("seq", "set"):
+        body = _show_numbers([int(x) for x in data if str(x).isdigit()], color)
+    elif kind == "pairs":
+        body = _show_pairs([(int(a), int(b)) for a, b in data], color)
+    elif kind == "num":
+        body = _show_decimal(str(data), color)
+    else:
+        return ""
 
-    return _sparks("G", len(nums))
+    if not body:
+        return ""
+    return "%s;%s;%s" % (_head(), body, _tail())
+
+
 ANSWER_FAIL = "!"       # будь-яка відповідь, що починається з '!', = не розпізнано
 
 PROMPT = (
@@ -355,6 +489,15 @@ def answer_key(text: str):
         pairs.append((left, right))
     if all_pairs and pairs:
         return ("pairs", tuple(sorted(pairs, key=lambda p: (len(p[0]), p[0]))))
+
+    # ЧИСЛОВА відповідь: один токен, який є числом (може мати крапку/косу риску).
+    one = t.replace(",", ".").strip()
+    if one and " " not in one and not one.startswith("-"):
+        try:
+            float(one)
+            return ("num", one)
+        except ValueError:
+            pass
 
     raw_tokens = [x for x in t.replace("-", " ").replace(",", " ").split() if x]
 
