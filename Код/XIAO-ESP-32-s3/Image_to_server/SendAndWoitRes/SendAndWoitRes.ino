@@ -171,7 +171,7 @@ void configCamera() {
   if (psramFound()) {
     config.frame_size = FRAMESIZE_FHD;  // 1920x1080
     config.jpeg_quality = 30;           // 0..63, менше = краще (30 = помірний стиск)
-    config.fb_count = 3;                // 3 кадри в черзі: 2 із завданням + запас
+    config.fb_count = 4;                // 4 кадри в черзі: 3 із завданням + запас
     config.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
     Serial.println("PSRAM not found! Check IDE settings.");
@@ -399,9 +399,9 @@ bool wifi_ensure() {
 }
 
 // Скільки кадрів робити за одне натискання і яка пауза між ними.
-// Мінімальна затримка: камера з fb_count=3 тримає кадри напоготові,
+// Мінімальна затримка: камера з fb_count=4 тримає кадри напоготові,
 // тому наступний esp_camera_fb_get() віддає вже готовий кадр без очікування.
-const int           SHOT_COUNT = 2;
+const int           SHOT_COUNT = 3;
 const unsigned long SHOT_GAP_MS = 30UL;      // мс між кадрами
 
 // Один повний цикл: (Wi-Fi вже є) -> фото -> upload.
