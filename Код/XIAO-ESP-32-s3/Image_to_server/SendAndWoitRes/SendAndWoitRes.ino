@@ -217,9 +217,19 @@ bool server_pending_anim = false;     // знайдено валідний LED-�
 LedStep anim[LED_MAX_STEPS];
 int     animLen = 0;
 
+static int count_char(const String& s, char what) {
+  int n = 0;
+  for (int i = 0; i < (int)s.length(); i++) if (s[i] == what) n++;
+  return n;
+}
+
 void handleServerResponse(String response) {
   Serial.println("Server response:");
   Serial.println(response);
+  // Діагностика: скільки байт тіла дійшло і як у ньому закодовані переводи.
+  // Монітор порту часто «з'їдає» переводи рядків, тому друкуємо позиції EOL.
+  Serial.printf("[RX] %d bytes, CR=%d LF=%d\n", (int)response.length(),
+                (int)count_char(response, '\r'), (int)count_char(response, '\n'));
 
   // Тіло відповіді може йти після заголовків — відрізаємо все до \r\n\r\n
   int hdr_end = response.indexOf("\r\n\r\n");
@@ -306,15 +316,26 @@ static bool parse_step(String tok, LedStep* out) {
 // Парсер усього рядка -> anim[]. Повертає кількість кроків (0 = не той формат).
 int parse_led_script(const String& text) {
   animLen = 0;
-  if (text.indexOf("LED:") < 0 && text.indexOf("ON:") < 0 && text.indexOf("SP:") < 0) {
+
+  // У тілі спершу йде сама відповідь, а LED-скрипт - з нового рядка.
+  // Нормалізуємо будь-які переводи рядків у ';', щоб "2\r\nLED:..." теж працювало,
+  // і прибираємо префікс "[ОДНА] " на початку.
+  String norm = text;
+  norm.replace("\r\n", ";");
+  norm.replace("\r", ";");
+  norm.replace("\n", ";");
+  norm.trim();
+  if (norm.startsWith("[ОДНА] ")) norm.remove(0, 7);
+
+  if (norm.indexOf("LED:") < 0 && norm.indexOf("ON:") < 0 && norm.indexOf("SP:") < 0) {
     return 0;
   }
 
   int from = 0;
-  while (animLen < LED_MAX_STEPS && from <= (int)text.length()) {
-    int p = text.indexOf(';', from);
-    String tok = (p < 0) ? text.substring(from) : text.substring(from, p);
-    from = (p < 0) ? text.length() + 1 : p + 1;
+  while (animLen < LED_MAX_STEPS && from <= (int)norm.length()) {
+    int p = norm.indexOf(';', from);
+    String tok = (p < 0) ? norm.substring(from) : norm.substring(from, p);
+    from = (p < 0) ? norm.length() + 1 : p + 1;
 
     trim_upper(tok);
     if (tok.length() == 0) continue;
@@ -322,6 +343,8 @@ int parse_led_script(const String& text) {
     LedStep st;
     if (parse_step(tok, &st)) {
       anim[animLen++] = st;
+    } else {
+      Serial.printf("[LED] skipped token: %s\n", tok.c_str());
     }
   }
   return animLen;
