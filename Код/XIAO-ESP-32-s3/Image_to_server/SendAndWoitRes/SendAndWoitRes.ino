@@ -403,7 +403,7 @@ bool wifi_ensure() {
 // Мінімальна затримка: камера з fb_count=4 тримає кадри напоготові,
 // тому наступний esp_camera_fb_get() віддає вже готовий кадр без очікування.
 const int           SHOT_COUNT = 3;
-const unsigned long SHOT_GAP_MS = 30UL;      // мс між кадрами
+const unsigned long SHOT_GAP_MS = 70UL;      // мс між кадрами (ледь помітна пауза)
 
 // Один повний цикл: (Wi-Fi вже є) -> фото -> upload.
 // Wi-Fi НЕ вимикається: з'єднання живе до глибокого сну.
