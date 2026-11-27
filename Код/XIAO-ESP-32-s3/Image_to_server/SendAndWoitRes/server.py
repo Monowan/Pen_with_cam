@@ -73,8 +73,6 @@ MODEL_CANDIDATES = [
     "gemini-3.1-flash-lite",     # 200, стабільна
     "gemini-flash-lite-latest",  # 200, стабільна
     "gemini-3-flash-preview",    # 200 (v1beta)
-    "gemini-3.6-flash",          # 200/503 залежно від навантаження
-    "gemini-3.5-flash",          # 200/503 залежно від навантаження
 ]
 _current_model = {"n": 0}
 
