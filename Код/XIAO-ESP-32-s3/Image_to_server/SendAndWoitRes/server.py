@@ -92,6 +92,79 @@ ANSWER_OK = "ANSWER:"
 # Ставиться ПЕРЕД відповіддю, щоб її не сплутати зі звичайною:
 #   [ОДНА] 3      [ОДНА] 4 3 1 2
 SINGLE_ANSWER_PREFIX = "[ОДНА] "
+
+# ===========================================================================
+# СИСТЕМА ІНДИКАЦІЇ СВІТЛОДІОДОМ
+# ---------------------------------------------------------------------------
+# Принцип: читається на дотик і боковим зором, без таблиць.
+#   • КОЛІР  = впевненість     зелене = добре, жовте = сумнівно, червоне = невдача
+#   • РИТМ   = зміст          рівні однакові спалахи = кількість, довге = «одне»
+#
+#   N зелених спалахів     — N правильних номерів (1..5)   ← основне
+#   один довгий зелений    — відповідь не про номери (число, пари)
+#   два ко роткі зелені     — відповідь є, але НЕ підтверджена другою моделлю
+#   жовте рівне світло 0.4с — понад 5 відповідей (точну кількість не показуємо)
+#   один довгий червоний   — не розпізнано (відмова)
+#   три короткі червоні     — моделі розійшлися в думках
+#
+# Ритм відрізняється і в темряві: спалахи рівні, пауза між ними ~= спалаху.
+# ===========================================================================
+LED_SPARK_MS = 90          # тривалість одного спалаху
+LED_SPARK_GAP = 110        # пауза між спалахами
+LED_LONG_MS = 700          # «довге» світло
+LED_PAUSE_BETWEEN = 400    # пауза перед повтором «коротких» сигналів
+
+# Межа, після якої рахувати спалахи стає нечитабельно
+MAX_COUNTED_ANSWERS = 5
+
+
+def _sparks(color: str, n: int) -> str:
+    """n рівних спалахів заданого кольору."""
+    return "LED:%s:SP:%d:%d:%d" % (color, LED_SPARK_MS, LED_SPARK_GAP, n)
+
+
+def _answer_numbers(answer: str) -> list:
+    """Витягує номери варіантів із відповіді, якщо це «номери».
+
+    Повертає список номерів для звичайної відповіді-набору/послідовності,
+    і порожній список, якщо відповідь не про номери варіантів
+    (числове значення або пари відповідності).
+    """
+    key = answer_key(answer)
+    if key[0] in ("seq", "set"):
+        nums = [t for t in key[1] if t.isdigit()]
+        return nums if len(nums) == len(key[1]) else []
+    return []
+
+
+def led_script_for(answer: str, confirmed: bool = True) -> str:
+    """Перетворює відповідь у LED-скрипт за системою індикації.
+
+    answer    — цифрова відповідь або '!FAIL: ...'
+    confirmed — чи підтвердила відповідь друга модель
+
+    Повертає рядок LED-скрипта; коли показувати нічого — порожній рядок.
+    """
+    if answer.startswith("!FAIL"):
+        if "розходяться" in answer:
+            return _sparks("R", 3)          # моделі розійшлися — три короткі червоні
+        return "LED:R:ON:%d" % LED_LONG_MS   # інша відмова — довге червоне
+
+    nums = _answer_numbers(answer)
+    if not nums:
+        # число або пари: довге зелене — «відповідь не про номери»
+        return "LED:G:ON:%d" % LED_LONG_MS
+
+    if not confirmed:
+        # єдину відповідь підтвердити нема кому: рівні короткі зелені,
+        # потім пауза і ряд повільних жовтих спалахів — «сумнівно»
+        return "%s;LED:Y:SP:%d:%d:%d" % (
+            _sparks("G", 2), 220, 180, min(len(nums), 3))
+
+    if len(nums) > MAX_COUNTED_ANSWERS:
+        return "LED:Y:ON:400"               # забагато — рівне жовте попередження
+
+    return _sparks("G", len(nums))
 ANSWER_FAIL = "!"       # будь-яка відповідь, що починається з '!', = не розпізнано
 
 PROMPT = (
@@ -359,6 +432,19 @@ def pick_best_frame(frames):
     return frames[best], scores, best
 
 
+def with_led(answer: str, confirmed: bool = True) -> str:
+    """Тіло відповіді = відповідь + новий рядок + LED-скрипт.
+
+    ESP бере перший рядок як відповідь і розбирає LED-скрипт з решти тіла,
+    тому обидві частини йдуть разом в одному TEXT-тілі.
+    """
+    script = led_script_for(answer, confirmed)
+    if not script:
+        return answer
+    app.logger.info("led script: %s", script)
+    return answer + "\n" + script
+
+
 def call_gemini(image_bytes: bytes, mime: str = "image/jpeg"):
     """Пробує моделі по колу і повертає відповідь ЛИШЕ за згодою (кворумом).
 
@@ -399,8 +485,9 @@ def call_gemini(image_bytes: bytes, mime: str = "image/jpeg"):
 
     if not votes:
         for f in fails:
-            return f
-        return "!FAIL: моделі недоступні (" + ", ".join(dict.fromkeys(errors[:3])) + ")"
+            return with_led(f, confirmed=False)
+        return with_led("!FAIL: моделі недоступні (" + ", ".join(dict.fromkeys(errors[:3])) + ")",
+                        confirmed=False)
 
     detail = "; ".join(f"{v['text']}: {len(v['models'])}x" for v in votes.values())
 
@@ -416,13 +503,13 @@ def call_gemini(image_bytes: bytes, mime: str = "image/jpeg"):
         _current_model["n"] = MODEL_CANDIDATES.index(ms[0])
         if len(ms) >= 2:
             app.logger.info("answer=%s agreed_by=%s", answer, ms)
-            return answer
+            return with_led(answer, confirmed=True)
         app.logger.warning("single answer (no confirmation): %s from %s (fails=%d errors=%d)",
                            answer, ms, len(fails), len(errors))
-        return SINGLE_ANSWER_PREFIX + answer
+        return with_led(SINGLE_ANSWER_PREFIX + answer, confirmed=False)
 
     app.logger.warning("models disagree: %s", detail)
-    return "!FAIL: моделі розходяться у відповіді (" + detail + ")"
+    return with_led("!FAIL: моделі розходяться у відповіді (" + detail + ")", confirmed=False)
 
 
 # ---------------------------------------------------------------------------
