@@ -116,6 +116,22 @@ static void blink_shot() {
   set_brightness(0, 0, 0);
 }
 
+// --- Сигнал "прокинувся, чекаю на кнопку" ---
+// Два короткі зелені блики: колір «дані» (зелений), але ритм 2x = стан,
+// не відповідь (сама відповідь завжди починається з 2 СИНІХ). Так після
+// пробудження видно, що ручка готова, навіть якщо кадру ще немає.
+const unsigned long WAKE_BLINK_MS = 60UL;
+const unsigned long WAKE_GAP_MS   = 120UL;
+
+static void blink_wakeup() {
+  for (int i = 0; i < 2; i++) {
+    set_brightness(0, 100, 0);
+    delay(WAKE_BLINK_MS);
+    set_brightness(0, 0, 0);
+    if (i == 0) delay(WAKE_GAP_MS);
+  }
+}
+
 // ===========================================================================
 // --- Таймер бездіяльності ---
 const unsigned long IDLE_SLEEP_MS = 60000UL;   // 1 хв без натискань -> deep sleep
@@ -153,11 +169,15 @@ void configCamera() {
   config.pixel_format = PIXFORMAT_JPEG;
   config.grab_mode = CAMERA_GRAB_LATEST;
 
-  // Використання OPI PSRAM для FHD
+  // Використання OPI PSRAM для максимальної роздільності
   if (psramFound()) {
-    config.frame_size = FRAMESIZE_FHD;  // 1920x1080
-    config.jpeg_quality = 30;           // 0..63, менше = краще (30 = помірний стиск)
-    config.fb_count = 4;                // 4 кадри в черзі: 3 із завданням + запас
+    // Сенсор OV2640 на модулі XIAO S3: максимум, який він фізично віддає
+    // в JPEG, — UXGA 1600x1200. FRAMESIZE_UXGA (а не MAXIMUM) — бо вище
+    // сенсор JPEG не робить, а «MAXIMUM» 2560x1920 віддає 4:3 шляхом
+    // апскейлу й лише збільшує файл без деталей.
+    config.frame_size = FRAMESIZE_UXGA; // 1600x1200
+    config.jpeg_quality = 12;           // 0..63, менше = якісніше (12 = майже без втрат)
+    config.fb_count = 2;                // UXGA не влазить у 4 кадри PSRAM
     config.fb_location = CAMERA_FB_IN_PSRAM;
   } else {
     Serial.println("PSRAM not found! Check IDE settings.");
@@ -414,9 +434,10 @@ bool wifi_ensure() {
 }
 
 // Скільки кадрів робити за одне натискання і яка пауза між ними.
-// Мінімальна затримка: камера з fb_count=4 тримає кадри напоготові,
-// тому наступний esp_camera_fb_get() віддає вже готовий кадр без очікування.
-const int           SHOT_COUNT = 3;
+// Після переходу на UXGA 1600x1200 + fb_count = 2 у PSRAM тримати 3 кадри
+// одночасно замало місця, тому за одне натискання робимо ОДИН кадр
+// і його ж відправляємо: серверу цього достатньо.
+const int           SHOT_COUNT = 1;
 const unsigned long SHOT_GAP_MS = 70UL;      // мс між кадрами (ледь помітна пауза)
 
 // Один повний цикл: (Wi-Fi вже є) -> фото -> upload.
@@ -466,7 +487,7 @@ bool do_capture_cycle() {
 
   // --- Upload (multipart/form-data, усі кадри в одному запиті) ---
   WiFiClient client;
-  client.setTimeout(15000); // Збільшено для FHD
+  client.setTimeout(20000); // UXGA-кадр більший за FHD: даємо 20 с
 
   // Межова лінія multipart і попередній підрахунок Content-Length,
   // щоб надіслати один запит без chunked-кодування.
@@ -562,13 +583,17 @@ void setup() {
   Serial.println("Wakeup by button!");
   wakeup_ready = true;
 
+  // Сигнал «прокинувся, чекаю на кнопку»: два короткі зелені блики.
+  // Кадр після пробудження НЕ робимо — користувач сам натискає кнопку,
+  // коли навів ручку на завдання.
+  blink_wakeup();
+
   // Wi-Fi піднімаємо одразу після пробудження і тримаємо до глибокого сну
   wifi_ensure();
 
-  // Перше фото одразу після пробудження — як було
-  do_capture_cycle();
+  Serial.println("[BTN] awake, waiting for press to take a photo");
 
-  // Таймер бездіяльності стартує після завершення циклу
+  // Таймер бездіяльності стартує одразу після пробудження
   lastActivityMs = millis();
   Serial.printf("Idle timer started: sleep after %lu s без натискань; WiFi %s\n",
                 IDLE_SLEEP_MS / 1000,
