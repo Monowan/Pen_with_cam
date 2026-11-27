@@ -246,9 +246,9 @@ def answer_key(text: str):
 
     Моделі пишуть ту саму відповідь по-різному:
         "4 3 1 2"   "4-3-1-2"   "4 1 3 2"   "4, 3, 1, 2"   "4312"
-    Для множинного вибору порядок номерів не має значення — це одна відповідь.
-    Але для завдань на відповідність (пари «1-3») порядок важливий і самі
-    пари впорядковані, тому:
+    Для множинного вибору ("1 4 5") порядок номерів не має значення,
+    але для ЗАВДАНЬ НА ВПОРЯДКУВАННЯ порядок — це і є відповідь,
+    тому форма ключа залежить від типу:
 
       • є дефіси і довжини частин збігаються → це пари: ключ = кортеж пар,
         пари сортуються за першим елементом (порядок пар не важливий,
@@ -279,15 +279,25 @@ def answer_key(text: str):
     if all_pairs and pairs:
         return ("pairs", tuple(sorted(pairs, key=lambda p: (len(p[0]), p[0]))))
 
-    # набір номерів: "4 3 1 2", "4-3-1-2" (дефіс як розділювач), "4312"
-    tokens = [x for x in t.replace("-", " ").replace(",", " ").split() if x]
-    if len(tokens) == 1 and tokens[0].isdigit() and len(tokens[0]) > 1 and "." not in tokens[0]:
-        # "4312" -> цифри 4,3,1,2 (злиплі номери варіантів).
+    raw_tokens = [x for x in t.replace("-", " ").replace(",", " ").split() if x]
+
+    # Завдання на ВПОРЯДКУВАННЯ: кожен токен — окрема однозначна цифра,
+    # і їх більше однієї ("4 1 3 2", "4-1-3-2"). Там порядок — це і є відповідь,
+    # тому ключ зберігає послідовність, а роздільники (пробіл/дефіс/кому)
+    # вважаються рівнозначними.
+    if len(raw_tokens) > 1 and all(len(x) == 1 and x.isdigit() for x in raw_tokens):
+        return ("seq", tuple(raw_tokens))
+
+    # Злиплі номери однією групою: "4312" -> 4,3,1,2
+    if (len(raw_tokens) == 1 and raw_tokens[0].isdigit()
+            and len(raw_tokens[0]) > 1 and "." not in raw_tokens[0]):
         # Свідомо НЕ робимо цього для чисел з однаковими цифрами ("22", "100")
         # і для довших за 4 символи — там уже схоже на числову відповідь.
-        digits = list(tokens[0])
+        digits = list(raw_tokens[0])
         if 2 <= len(digits) <= 4 and len(set(digits)) == len(digits):
-            tokens = digits
+            return ("seq", tuple(digits))
+
+    tokens = raw_tokens
     if not tokens:
         return ("empty",)
     return ("set", tuple(sorted(tokens, key=lambda x: (len(x), x))))
@@ -300,7 +310,7 @@ def canonical_answer(text: str) -> str:
         return text
     if k[0] == "pairs":
         return " ".join(f"{a}-{b}" for a, b in k[1])
-    if k[0] == "set":
+    if k[0] in ("set", "seq"):
         return " ".join(k[1])
     return text
 
