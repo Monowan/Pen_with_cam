@@ -241,6 +241,70 @@ def normalize_answer(raw: str) -> str:
     return t
 
 
+def answer_key(text: str):
+    """Канонічний ключ для порівняння відповідей між моделями.
+
+    Моделі пишуть ту саму відповідь по-різному:
+        "4 3 1 2"   "4-3-1-2"   "4 1 3 2"   "4, 3, 1, 2"   "4312"
+    Для множинного вибору порядок номерів не має значення — це одна відповідь.
+    Але для завдань на відповідність (пари «1-3») порядок важливий і самі
+    пари впорядковані, тому:
+
+      • є дефіси і довжини частин збігаються → це пари: ключ = кортеж пар,
+        пари сортуються за першим елементом (порядок пар не важливий,
+        порядок усередині пари — важливий);
+      • інакше → це набір номерів/числа: ключ = відсортований кортеж токенів.
+
+    Повертає tuple, придатний для порівняння; для '!FAIL' — ('fail', текст).
+    """
+    t = (text or "").strip()
+    if t.startswith("!FAIL"):
+        return ("fail", t)
+    # токени: усе, що між розділювачами
+    raw_parts = [x for x in t.replace(",", " ").replace(";", " ").split() if x]
+
+    # чи це пари виду "1-3" / "1 - 3"?
+    pairs = []
+    all_pairs = True
+    for part in raw_parts:
+        if "-" not in part:
+            all_pairs = False
+            break
+        left, _, right = part.partition("-")
+        left, right = left.strip(), right.strip()
+        if not (left.isdigit() and right.isdigit()) or not right:
+            all_pairs = False
+            break
+        pairs.append((left, right))
+    if all_pairs and pairs:
+        return ("pairs", tuple(sorted(pairs, key=lambda p: (len(p[0]), p[0]))))
+
+    # набір номерів: "4 3 1 2", "4-3-1-2" (дефіс як розділювач), "4312"
+    tokens = [x for x in t.replace("-", " ").replace(",", " ").split() if x]
+    if len(tokens) == 1 and tokens[0].isdigit() and len(tokens[0]) > 1 and "." not in tokens[0]:
+        # "4312" -> цифри 4,3,1,2 (злиплі номери варіантів).
+        # Свідомо НЕ робимо цього для чисел з однаковими цифрами ("22", "100")
+        # і для довших за 4 символи — там уже схоже на числову відповідь.
+        digits = list(tokens[0])
+        if 2 <= len(digits) <= 4 and len(set(digits)) == len(digits):
+            tokens = digits
+    if not tokens:
+        return ("empty",)
+    return ("set", tuple(sorted(tokens, key=lambda x: (len(x), x))))
+
+
+def canonical_answer(text: str) -> str:
+    """Людський вигляд канонічного ключа — для логів і повідомлень."""
+    k = answer_key(text)
+    if k[0] == "fail":
+        return text
+    if k[0] == "pairs":
+        return " ".join(f"{a}-{b}" for a, b in k[1])
+    if k[0] == "set":
+        return " ".join(k[1])
+    return text
+
+
 def image_sharpness(image_bytes: bytes) -> float:
     """Оцінка різкості: дисперсія лапласіана (чим більше — тим різкіше).
 
@@ -291,7 +355,7 @@ def call_gemini(image_bytes: bytes, mime: str = "image/jpeg"):
     і ніколи не вибираємо 'більшість голосів' як заспокоєння.
     """
     order = MODEL_CANDIDATES[_current_model["n"]:] + MODEL_CANDIDATES[:_current_model["n"]]
-    votes = {}    # цифрова відповідь -> [моделі]
+    votes = {}    # канонічний ключ -> {"text": людський вигляд, "models": [...]}
     fails = []    # '!FAIL: причина'
     errors = []   # 429 / 404 / таймаут
     for model in order:
@@ -313,16 +377,23 @@ def call_gemini(image_bytes: bytes, mime: str = "image/jpeg"):
             # '0' — не номер варіанта (нумерація з 1), а ознака невпевненості
             fails.append("!FAIL: модель не впевнена у відповіді")
         else:
-            votes.setdefault(out, []).append(model)
+            key = answer_key(out)
+            slot = votes.setdefault(key, {"text": canonical_answer(out), "variants": [], "models": []})
+            slot["models"].append(model)
+            if out not in slot["variants"]:
+                slot["variants"].append(out)
 
     if not votes:
         for f in fails:
             return f
         return "!FAIL: моделі недоступні (" + ", ".join(dict.fromkeys(errors[:3])) + ")"
 
-    detail = "; ".join(f"{a}: {len(ms)}x" for a, ms in votes.items())
+    detail = "; ".join(f"{v['text']}: {len(v['models'])}x" for v in votes.values())
     if len(votes) == 1:
-        answer, ms = next(iter(votes.items()))
+        slot = next(iter(votes.values()))
+        answer, ms = slot["text"], slot["models"]
+        if len(slot["variants"]) > 1:
+            app.logger.info("same answer written differently: %s", slot["variants"])
         if len(ms) >= 2:
             _current_model["n"] = MODEL_CANDIDATES.index(ms[0])
             app.logger.info("answer=%s agreed_by=%s", answer, ms)
