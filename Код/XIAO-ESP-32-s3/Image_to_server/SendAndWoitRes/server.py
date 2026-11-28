@@ -478,8 +478,9 @@ ANSWER_FAIL = "!"       # будь-яка відповідь, що почина�
 # вгадувати — вона й відмовляла. Тут лише формат і нумерація варіантів.
 PROMPT = (
     "Прочитай завдання на фото. Відповідай ЛИШЕ цифрою варіанта, нумеруючи "
-    "варіанти з 1 (А=1, Б=2, В=3, Г=4). Якщо правильних кілька — номери через "
-    "пробіл (1 4 5). Встановлення відповідності — пари через пробіл (1-3 2-1). "
+    "варіанти з 1 (А=1, Б=2, В=3, Г=4, Д=5). Якщо правильних кілька — номери "
+    "через пробіл (1 4 5). Встановлення відповідності — пари номер-варіант "
+    "через пробіл, варіант теж номером (1-3 2-1 3-5 4-2). "
     "Числова відповідь — саме число з крапкою (25.5). Без пояснень. "
     "ВАЖЛИВО: розв'язуй виключно за тим, що видно на фото — за виділеними "
     "жирним буквами у словах. Не вгадуй відповідь за типом/шаблоном завдання "
@@ -598,9 +599,56 @@ def normalize_answer(raw: str) -> str:
     # Сувора перевірка: лише цифри, пробіли, дефіси та крапка.
     # '2\n' допустиме, але 'The', "{'candidates'...", '2x' — ні.
     t = t.strip()
+    if _looks_like_letter_pairs(t):
+        return _letter_pairs_to_nums(t)
     if not t or not all(c in "0123456789 -." for c in t) or not any(c.isdigit() for c in t):
         return "!FAIL: модель не дала коректну відповідь"
     return t
+
+
+def _looks_like_letter_pairs(t: str) -> bool:
+    """Чи це '1-А 2-Б ...' (цифра-літера, без жодного іншого сміття)?"""
+    toks = [x for x in t.replace(",", " ").replace(";", " ").split() if x]
+    if not toks or len(toks) > 12:
+        return False
+    for tok in toks:
+        left, sep, right = tok.partition("-")
+        if not sep or not left.strip().isdigit():
+            return False
+        if _letter_to_num(right.strip()) is None:
+            return False
+    return True
+
+
+def _letter_pairs_to_nums(t: str) -> str:
+    """'1-А 2-Б' → '1-1 2-2' (літери зведено до номерів)."""
+    out = []
+    for tok in t.replace(",", " ").replace(";", " ").split():
+        if not tok:
+            continue
+        left, _, right = tok.partition("-")
+        out.append("%s-%s" % (left.strip(), _letter_to_num(right.strip())))
+    return " ".join(out)
+
+
+def _letter_to_num(tok: str):
+    """Літера варіанта → номер ('А'→'1' ... 'Д'→'5'), або None.
+
+    Потрібно для завдань на відповідність із 5 варіантами: модель пише
+    '1-А 2-Б', а порівнювати й показувати на LED треба числа.
+    """
+    t = (tok or "").strip().upper()
+    if not t:
+        return None
+    if t.isdigit():
+        return t
+    uk = "АБВГДЕЄЖИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ"
+    lat = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if len(t) == 1 and t in uk:
+        return str(uk.index(t) + 1)
+    if len(t) == 1 and t in lat:
+        return str(lat.index(t) + 1)
+    return None
 
 
 def answer_key(text: str):
@@ -622,10 +670,20 @@ def answer_key(text: str):
     t = (text or "").strip()
     if t.startswith("!FAIL"):
         return ("fail", t)
+    # Префікс '[ОДНА] ' — це службова позначка сервера, а не частина відповіді.
+    # Без цього він потрапляв у токени і ламав розбір («[ОДНА] 1-А 2-Б» не
+    # визнавався парою, а ставав сміттєвим набором).
+    if t.startswith(SINGLE_ANSWER_PREFIX):
+        t = t[len(SINGLE_ANSWER_PREFIX):].strip()
+    elif t.startswith("[ОДНА]"):
+        t = t[len("[ОДНА]"):].strip()
     # токени: усе, що між розділювачами
     raw_parts = [x for x in t.replace(",", " ").replace(";", " ").split() if x]
 
-    # чи це пари виду "1-3" / "1 - 3"?
+    # чи це пари виду "1-3" / "1 - 3" / "1-A" (або "1-А")?
+    # Завдання на відповідність часто мають 5 варіантів А–Д, і моделі
+    # відповідають літерами (1-А 2-Б ...). Літеру зводимо до номера:
+    # А=1, Б=2, В=3, Г=4, Д=5 (латиниця A–E — те саме).
     pairs = []
     all_pairs = True
     for part in raw_parts:
@@ -634,10 +692,11 @@ def answer_key(text: str):
             break
         left, _, right = part.partition("-")
         left, right = left.strip(), right.strip()
-        if not (left.isdigit() and right.isdigit()) or not right:
+        right_num = _letter_to_num(right)
+        if not (left.isdigit() and right_num) or not right:
             all_pairs = False
             break
-        pairs.append((left, right))
+        pairs.append((left, right_num))
     if all_pairs and pairs:
         return ("pairs", tuple(sorted(pairs, key=lambda p: (len(p[0]), p[0]))))
 
