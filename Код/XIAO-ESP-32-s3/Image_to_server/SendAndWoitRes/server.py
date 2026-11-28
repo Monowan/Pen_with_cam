@@ -132,6 +132,13 @@ LED_DIGIT_GAP     = 180    # пауза між спалахами ОДНОГО �
 LED_GROUP_GAP_MS  = 450    # між номерами «1  4  5»
 LED_DECIMAL_GAP_MS = 1000  # десяткова крапка «25.5»
 LED_PAIR_GAP_MS   = 1600   # початок нової пари «1-3  2-1»
+# Паузи ДЛЯ МНОЖИННОЇ відповіді («1 4 5» — кілька правильних варіантів).
+# Той самий набір номерів, але помітно повільніше: у множинному виборі легко
+# загубити, де закінчився один номер і почався наступний, тому роздільники
+# тут у ~1.9 раза довші. Спалах лишається тим самим (260 мс) — змінюється
+# тільки ритм пауз, щоб око встигало «відділити» числа.
+LED_MULTI_GAP_MS  = 850    # між номерами у множинній відповіді
+LED_MULTI_SESSION_MS = 900  # пауза після шапки у множинній відповіді
 LED_HEAD_BLINK_MS = 120    # шапка/кінець
 LED_HEAD_GAP_MS   = 160
 LED_SESSION_MS    = 450    # пауза після шапки
@@ -302,13 +309,18 @@ def _join(*parts) -> str:
     return ";".join(out)
 
 
-def _seq_parts(nums, color="G"):
-    """Ряд номерів: кожна цифра окремо, між сусідніми цифрами — межа 450 мс."""
+def _seq_parts(nums, color="G", gap_ms=None):
+    """Ряд номерів: кожна цифра окремо, між сусідніми цифрами — межа 450 мс.
+
+    gap_ms — необов'язкова довша межа (використовується у множинній
+    відповіді, де номери розділені 850 мс, див. LED_MULTI_GAP_MS).
+    """
     parts = []
+    gap = LED_GROUP_GAP_MS if gap_ms is None else gap_ms
     flat = [int(c) for v in nums for c in str(abs(int(v)))]
     for i, d in enumerate(flat):
         if i:
-            parts.append(_gap_ms(LED_GROUP_GAP_MS))
+            parts.append(_gap_ms(gap))
         parts.append(_digit_part(d, color))
     return parts
 
@@ -376,7 +388,14 @@ def _build_parts(kind, data, color):
                     parts.append(_gap_ms(LED_GROUP_GAP_MS))
                 parts.extend(_number_parts(t, color))
             return parts
-        return _seq_parts([x for x in toks if x.isdigit()], color)
+        # «set» = кілька правильних варіантів («1 4 5») — показуємо ПОВІЛЬНІШЕ,
+        # щоб було видно, де закінчується один номер.
+        # ВАЖЛИВО: answer_key з одним цифровим токеном на номер повертає
+        # ('seq', ...) навіть для «1 4» — тому повільний ритм визначає НЕ
+        # тип ключа, а сама множина: більше одного номера = множинна відповідь.
+        multi = len(data) > 1
+        gap = LED_MULTI_GAP_MS if multi else None
+        return _seq_parts([x for x in toks if x.isdigit()], color, gap_ms=gap)
     if kind == "pairs":
         return _pair_parts([(int(a), int(b)) for a, b in data], color)
     if kind == "num":
@@ -468,7 +487,11 @@ def led_script_for(answer: str, confirmed: bool = True) -> str:
     body = _fit(*_build_parts(kind, data, color))
     if not body:
         return ""
-    return _join(_head(), body, _tail())
+    # Множинна відповідь («1 4 5») - пауза після шапки довша, щоб мозок
+    # встиг перемкнутись з «слухаю» на «рахую варіанти».
+    multi = kind == "set" or (kind == "seq" and isinstance(data, tuple) and len(data) > 1)
+    session = LED_MULTI_SESSION_MS if multi else LED_SESSION_MS
+    return _join(_head(), _gap_ms(session), body, _tail())
 
 
 ANSWER_FAIL = "!"       # будь-яка відповідь, що починається з '!', = не розпізнано
